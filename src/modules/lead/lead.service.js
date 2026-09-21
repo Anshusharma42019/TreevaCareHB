@@ -1,0 +1,982 @@
+import httpStatus from 'http-status';
+import mongoose from 'mongoose';
+import Lead from './lead.model.js';
+import PilesLead from './pilesLead.model.js';
+import Task from '../task/task.model.js';
+import Cnp from '../cnp/cnp.model.js';
+import Verification from '../verification/verification.model.js';
+import CallAgain from '../callagain/callagain.model.js';
+import User from '../user/user.model.js';
+import Attendance from '../attendance/attendance.model.js';
+import ApiError from '../../utils/ApiError.js';
+import { createNotification } from '../notification/notification.service.js';
+import * as interaktService from '../interakt/interakt.service.js';
+import { InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder } from '../transition/statusModels.js';
+import { detectDepartmentFromText } from '../../utils/departmentKeywords.js';
+
+const getStatusModel = (status) => {
+  if (!status) return null;
+  const s = status.toLowerCase();
+  if (s === 'interested' || s === 'warm') return InterestedLead;
+  if (s === 'closed_lost' || s === 'not_interested' || s === 'lost' || s === 'rejected' || s === 'cancelled') return NotInterestedLead;
+  if (s === 'on_hold' || s === 'hold' || s === 'parked') return OnHoldOrder;
+  if (s === 'pending_order' || s === 'pending_evaluation' || s === 'pendingorder') return PendingOrder;
+  if (s === 'verified' || s === 'verified_order' || s === 'converted' || s === 'closed_won') return VerifiedOrder;
+  return null;
+};
+
+const resolveLeadDocument = async (id, populateFull = false) => {
+  if (!id || !mongoose.isValidObjectId(String(id))) return null;
+  const matchId = String(id);
+  
+  const applyPopulations = (query) => {
+    query = query.populate('assignedTo', 'name email role').populate('createdBy', 'name email');
+    if (populateFull && query.populate) {
+      try { query = query.populate('notes.createdBy', 'name').populate('follow_ups.createdBy', 'name'); } catch (e) {}
+    }
+    return query;
+  };
+
+  // 1. Search across Lead and status tables for active unarchived record
+  const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+  for (const Model of allModels) {
+    try {
+      const doc = await applyPopulations(Model.findOne({ _id: matchId, isDeleted: { $ne: true }, isArchived: { $ne: true } }));
+      if (doc) return { doc, model: Model };
+    } catch (e) {}
+  }
+
+  // 2. If matchId is a wrapper record ID (Cnp, CallAgain, Task, Verification), resolve to the actual lead!
+  for (const Wrapper of [Cnp, CallAgain, Task, Verification]) {
+    try {
+      const wrapper = await Wrapper.findById(matchId).select('lead').lean();
+      if (wrapper && wrapper.lead && String(wrapper.lead) !== matchId) {
+        const resolved = await resolveLeadDocument(wrapper.lead, populateFull);
+        if (resolved) return resolved;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback: Search across all tables without deletion filter so even soft-deleted records can be viewed or resurrected!
+  for (const Model of allModels) {
+    try {
+      const doc = await applyPopulations(Model.findById(matchId));
+      if (doc) {
+        doc.isDeleted = false;
+        doc.isArchived = false;
+        return { doc, model: Model };
+      }
+    } catch (e) {}
+  }
+
+  return null;
+};
+
+export const findLeadByPhone = async (phone) => {
+  if (!phone) return null;
+  const clean = phone.replace(/\D/g, '');
+  if (clean.length < 10) return null;
+  const last10 = clean.slice(-10);
+  
+  const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+  for (const Model of allModels) {
+    if (!Model) continue;
+    const doc = await Model.findOne({ phone: { $regex: last10 + '$' }, isDeleted: { $ne: true } });
+    if (doc) return doc;
+  }
+  return null;
+};
+
+const notifyAdmins = async (data) => {
+  const admins = await User.find({ role: { $in: ['admin', 'manager'] }, isDeleted: false }, '_id');
+  await Promise.all(admins.map(a => createNotification({ ...data, user: a._id }).catch(() => {})));
+};
+
+const toPilesLeadPayload = (lead) => ({
+  lead: lead._id,
+  name: lead.name,
+  phone: lead.phone,
+  email: lead.email,
+  address: lead.address,
+  houseNo: lead.houseNo,
+  cityVillage: lead.cityVillage,
+  cityVillageType: lead.cityVillageType,
+  postOffice: lead.postOffice,
+  landmark: lead.landmark,
+  district: lead.district,
+  state: lead.state,
+  pincode: lead.pincode,
+  source: lead.source,
+  status: lead.status,
+  note: lead.note,
+  problem: lead.problem,
+  type: lead.type,
+  revenue: lead.revenue,
+  cnp: lead.cnp,
+  cnpCount: lead.cnpCount,
+  cnpAt: lead.cnpAt,
+  next_follow_up: lead.next_follow_up,
+  onHoldReason: lead.onHoldReason,
+  onHoldUntil: lead.onHoldUntil,
+  assignedTo: lead.assignedTo?._id || lead.assignedTo,
+  createdBy: lead.createdBy?._id || lead.createdBy,
+  isDeleted: lead.isDeleted,
+  deletedAt: lead.deletedAt,
+});
+
+export const syncPilesLead = async (lead) => {
+  if (!lead?._id) return;
+  if (lead.department === 'piles') {
+    await PilesLead.findOneAndUpdate(
+      { lead: lead._id },
+      { $set: toPilesLeadPayload(lead) },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+    );
+  } else {
+    await PilesLead.findOneAndUpdate(
+      { lead: lead._id },
+      { $set: { isDeleted: true, deletedAt: new Date() } }
+    );
+  }
+};
+
+// Auto-detect department from the problem description text
+const detectDepartmentFromProblem = (problem) => {
+  return detectDepartmentFromText(problem);
+};
+
+// TRUE Round Robin — assigns to the user who was assigned a lead least recently
+export const getNextSalesUser = async (department = null) => {
+  const query = { role: 'sales', isDeleted: false };
+  if (department) {
+    query.departments = { $in: [department] };
+  }
+  const salesUsers = await User.find(query).sort({ createdAt: 1 });
+  if (!salesUsers.length) return null;
+
+  // Find users who are checked in and not checked out today
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const activeAttendances = await Attendance.find({
+    user: { $in: salesUsers.map(u => u._id) },
+    checkIn: { $ne: null },
+    checkOut: null,
+    isDeleted: false,
+    $or: [
+      { date: { $gte: startOfDay, $lte: endOfDay } },
+      { checkIn: { $gte: startOfDay } },
+    ],
+  });
+
+  const activeUserIds = activeAttendances.map(a => a.user.toString());
+  const activeSalesUsers = salesUsers.filter(u => activeUserIds.includes(u._id.toString()));
+
+  // Fallback: If no one is checked in, fallback to all active sales users 
+  // so night leads are always assigned to someone for the morning.
+  const eligibleUsers = activeSalesUsers.length > 0 ? activeSalesUsers : salesUsers;
+
+  // Round Robin: pick user with oldest (or null) lastLeadAssignedAt
+  // null = never assigned → highest priority (-Infinity)
+  let selectedUser = eligibleUsers[0];
+  for (let i = 1; i < eligibleUsers.length; i++) {
+    const u = eligibleUsers[i];
+    const selectedTime = selectedUser.lastLeadAssignedAt ? selectedUser.lastLeadAssignedAt.getTime() : -Infinity;
+    const uTime = u.lastLeadAssignedAt ? u.lastLeadAssignedAt.getTime() : -Infinity;
+    if (uTime < selectedTime) {
+      selectedUser = u;
+    }
+  }
+
+  // Stamp this user immediately so next call rotates to next person
+  await User.findByIdAndUpdate(selectedUser._id, { lastLeadAssignedAt: new Date() });
+
+  return selectedUser._id;
+};
+
+export const createLead = async (data, createdBy, creatorRole, userDepartments = []) => {
+  // Normalize phone: strip +91/91 prefix, keep last 10 digits
+  if (data.phone) {
+    let p = data.phone.replace(/\s+/g, '').trim();
+    if (p.startsWith('+91')) p = p.substring(3);
+    else if (p.startsWith('91') && p.length === 12) p = p.substring(2);
+    else if (p.startsWith('+')) p = p.substring(1);
+    data.phone = p.slice(-10);
+  }
+
+  // Duplicate check using last-10-digits regex so +91XXXXXXXXXX and XXXXXXXXXX match the same lead
+  const last10 = data.phone?.slice(-10);
+  let existingLead = null;
+  if (last10) {
+    const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+    for (const Model of allModels) {
+      existingLead = await Model.findOne({ phone: { $regex: last10 + '$' }, isDeleted: { $ne: true } });
+      if (existingLead) break;
+    }
+  }
+  if (existingLead) throw new ApiError(httpStatus.CONFLICT, 'A lead with this phone number already exists');
+
+  if (!data.assignedTo) {
+    // Auto-detect department from problem field if not already set
+    if (!data.department && data.problem) {
+      const detected = detectDepartmentFromProblem(data.problem);
+      if (detected) data.department = detected;
+    }
+
+    // If Admin/Manager adds a lead, auto-distribute it.
+    // If regular staff (sales/support) manually adds a lead, assign it to themselves.
+    if (createdBy && creatorRole !== 'admin' && creatorRole !== 'manager') {
+      data.assignedTo = createdBy;
+      // Only override department if the user didn't explicitly select one in the form
+      if (!data.department && userDepartments && userDepartments.length > 0) {
+        data.department = userDepartments[0] || null;
+      }
+    } else {
+      data.assignedTo = await getNextSalesUser(data.department);
+      // Removed fallback to Admin/Creator so night leads stay unassigned.
+    }
+  } else if (creatorRole === 'sales' && userDepartments && userDepartments.length > 0) {
+    // Only fall back to user's department if not provided in form
+    if (!data.department) data.department = userDepartments[0] || null;
+  }
+
+  if (!data.department) delete data.department;
+  const payload = { ...data };
+  if (createdBy) payload.createdBy = createdBy;
+
+  const lead = await Lead.create(payload);
+  await syncPilesLead(lead);
+
+  // Track the user in Interakt when a new lead is created
+  interaktService.trackUser(lead).catch(err => console.error('Failed to track user in Interakt', err));
+
+  if (lead.assignedTo) {
+    // Notify assigned sales person
+    await createNotification({
+      user: lead.assignedTo,
+      title: 'New Lead Assigned',
+      message: `Lead "${lead.name}" has been assigned to you.`,
+      type: 'lead_assigned',
+      relatedLead: lead._id,
+    }).catch(() => {});
+    
+    await notifyAdmins({ title: 'New Lead Created', message: `Lead "${lead.name}" was created and assigned.`, type: 'lead_assigned', relatedLead: lead._id });
+  } else {
+    // Notify admins that a new UNASSIGNED lead arrived
+    await notifyAdmins({ title: 'New Unassigned Lead', message: `Lead "${lead.name}" was created but is unassigned.`, type: 'lead_assigned', relatedLead: lead._id });
+  }
+
+  if (lead.assignedTo) {
+
+    // Auto-create a CALL task — only if no active task already exists for this lead
+    const assignedToId = lead.assignedTo._id ?? lead.assignedTo;
+    if (assignedToId) {
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+      if (!existingTask) {
+        const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        const taskCreatedBy = createdBy
+          ? new mongoose.Types.ObjectId(String(createdBy))
+          : assignedToId;
+        await Task.create({
+          title: lead.name,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: taskCreatedBy,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
+      }
+    } else {
+      console.warn('[AUTO-TASK] Skipped — no sales user available for lead:', lead._id);
+    }
+  }
+
+  return lead;
+};
+
+export const distributeUnassignedLeads = async (adminId) => {
+  // Find all unassigned leads that are "new" and not deleted, OR leads assigned to the admin
+  const unassignedLeads = await Lead.find({ assignedTo: { $in: [null, adminId] }, status: 'new', isDeleted: false }).sort({ createdAt: 1 });
+  let distributedCount = 0;
+
+  for (const lead of unassignedLeads) {
+    const assignedToId = await getNextSalesUser(lead.department);
+    if (assignedToId) {
+      // Assign lead
+      lead.assignedTo = assignedToId;
+      await lead.save();
+
+      // Create a Call Task only if no active task already exists for this lead
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+      const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      let task = existingTask;
+      if (existingTask) {
+        existingTask.assignedTo = assignedToId;
+        await existingTask.save();
+      } else {
+        task = await Task.create({
+          title: lead.name,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: adminId || assignedToId,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
+      }
+
+      const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+      await Promise.all([
+        Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+      ]).catch(err => console.error('Cascading reassignment error:', err));
+
+      // Send notification
+      await createNotification({
+        user: assignedToId,
+        title: 'New Lead Assigned (Night Distribution)',
+        message: `You have been assigned a pending lead: ${lead.name}`,
+        type: 'lead_assigned',
+        relatedLead: lead._id,
+        relatedTask: task._id,
+      });
+
+      distributedCount++;
+    }
+  }
+  return { success: true, message: `Successfully distributed ${distributedCount} leads.` };
+};
+
+export const distributeAbsentSalesLeads = async () => {
+  console.log("Starting distributeAbsentSalesLeads");
+  // Find users who are checked in and not checked out today
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
+  
+  console.log("Fetching all sales users");
+  const allSalesUsers = await User.find({ role: 'sales', isDeleted: false }, '_id');
+  console.log("Found sales users:", allSalesUsers.length);
+  
+  const activeAttendances = await Attendance.find({
+    user: { $in: allSalesUsers.map(u => u._id) },
+    checkIn: { $ne: null },
+    checkOut: null,
+    isDeleted: false,
+    $or: [
+      { date: { $gte: startOfDay, $lte: endOfDay } },
+      { checkIn: { $gte: startOfDay } },
+    ],
+  });
+
+  const activeUserIds = activeAttendances.map(a => a.user.toString());
+  
+  // Sales users who are NOT checked in
+  const absentUserIds = allSalesUsers
+    .filter(u => !activeUserIds.includes(u._id.toString()))
+    .map(u => u._id);
+  console.log("Absent User IDs:", absentUserIds.length);
+
+  if (absentUserIds.length === 0) {
+    return { success: true, message: 'No absent sales users found.' };
+  }
+  
+  if (activeUserIds.length === 0) {
+    return { success: true, message: 'No active sales users to redistribute leads to.' };
+  }
+
+  // Include yesterday and today to catch leads assigned after their shift yesterday
+  const startOfYesterday = new Date(startOfDay);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+
+  const leadsToRedistribute = await Lead.find({ 
+    assignedTo: { $in: absentUserIds }, 
+    status: 'new', 
+    createdAt: { $gte: startOfYesterday, $lte: endOfDay },
+    isDeleted: false 
+  }).sort({ createdAt: 1 });
+  console.log("Leads to redistribute:", leadsToRedistribute.length);
+
+  let distributedCount = 0;
+
+  for (const lead of leadsToRedistribute) {
+    const assignedToId = await getNextSalesUser(lead.department);
+    
+    // Safety check: ensure we don't accidentally re-assign to an absent user
+    // if getNextSalesUser somehow falls back (it shouldn't if active users exist)
+    if (assignedToId && !absentUserIds.some(id => id.equals(assignedToId))) {
+      lead.assignedTo = assignedToId;
+      await lead.save();
+
+      // Update existing Task or create new one
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+      
+      if (existingTask) {
+        existingTask.assignedTo = assignedToId;
+        await existingTask.save();
+      } else {
+        const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        await Task.create({
+          title: lead.name,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: assignedToId,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
+      }
+
+      const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+      await Promise.all([
+        Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+      ]).catch(err => console.error('Cascading reassignment error:', err));
+
+      // Send notification
+      await createNotification({
+        user: assignedToId,
+        title: 'Redistributed Lead Assigned',
+        message: `Lead ${lead.name} reassigned to you due to absence.`,
+        type: 'lead_assigned',
+        relatedLead: lead._id,
+      });
+
+      distributedCount++;
+    }
+  }
+
+  return { success: true, message: `Successfully redistributed ${distributedCount} leads from absent staff.` };
+};
+
+export const getLeads = async (filter, options, userRole, userId, userDepartments = []) => {
+  const query = { isDeleted: false };
+
+  if (filter.whatsappOnly === 'true' || filter.whatsappOnly === true) {
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { 'notes.direction': 'outbound' },
+        { 'notes.text': /[Interakt Message]|\[Attached Media/ },
+        { problem: /[Interakt Message]/ },
+        { source: 'social_media' }
+      ]
+    });
+  }
+
+  const sharedStatuses = ['interested', 'closed_lost', 'on_hold'];
+  const isSharedStatus = filter.status && sharedStatuses.includes(filter.status);
+  
+  if (userRole === 'sales') {
+    if (!isSharedStatus) query.assignedTo = new mongoose.Types.ObjectId(userId);
+  }
+  
+  if (filter.department) {
+    query.department = filter.department;
+    if (userRole !== 'admin' && userRole !== 'manager' && userDepartments && userDepartments.length > 0) {
+      if (!userDepartments.includes(filter.department)) query.department = "NOT_ALLOWED";
+    }
+  } else if (userRole !== 'admin' && userRole !== 'manager' && userDepartments && userDepartments.length > 0) {
+    query.department = { $in: userDepartments };
+  }
+
+  const isExport = filter.export === 'true';
+  const isWhatsapp = filter.whatsappOnly === 'true' || filter.whatsappOnly === true;
+
+  if (!isExport && !isWhatsapp) {
+    if (!filter.cnp) query.cnp = { $ne: true };
+
+    if (filter.status) {
+      query.status = filter.status;
+    } else if (!filter.cnp) {
+      query.status = { $nin: ['closed_won', 'closed_lost', 'interested', 'follow_up', 'on_hold'] };
+    }
+  }
+  
+  if (filter.source) query.source = filter.source;
+  if (filter.assignedTo && userRole !== 'sales') query.assignedTo = new mongoose.Types.ObjectId(filter.assignedTo);
+  if (filter.cnp === 'true') query.cnp = true;
+
+  if (filter.search) {
+    query.$or = [
+      { name: { $regex: filter.search, $options: 'i' } },
+      { phone: { $regex: filter.search, $options: 'i' } },
+      { email: { $regex: filter.search, $options: 'i' } },
+    ];
+  }
+  
+  if (filter.dateFrom || filter.dateTo) {
+    query.createdAt = {};
+    if (filter.dateFrom) query.createdAt.$gte = new Date(filter.dateFrom);
+    if (filter.dateTo) {
+      const to = new Date(filter.dateTo);
+      to.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = to;
+    }
+  }
+
+  if (filter.month !== undefined && filter.month !== null && filter.month !== '' && !filter.dateFrom && !filter.dateTo) {
+    const m = parseInt(filter.month);
+    const yr = new Date().getFullYear();
+    query.createdAt = { $gte: new Date(yr, m, 1), $lt: new Date(yr, m + 1, 1) };
+  }
+
+  const page = parseInt(options.page) || 1;
+  const limit = parseInt(options.limit) || 20;
+  const skip = (page - 1) * limit;
+  const sortCriteria = isWhatsapp ? { updatedAt: -1 } : { createdAt: -1 };
+
+  const pipeline = [ { $match: query } ];
+
+  if (!filter.cnp && !isExport && !isWhatsapp) {
+    const isOnHold = filter.status === 'on_hold';
+    const isInterested = filter.status === 'interested';
+
+    const taskStatuses = isInterested 
+      ? ['pending', 'overdue', 'verification', 'ready_to_shipment']
+      : isOnHold 
+        ? ['verification', 'ready_to_shipment', 'interested']
+        : ['cnp', 'verification', 'ready_to_shipment', 'interested'];
+
+    const matchFilterBase = {};
+    if (userRole === 'sales') matchFilterBase.assignedTo = new mongoose.Types.ObjectId(userId);
+    else if (filter.department) matchFilterBase.department = filter.department;
+
+    const [activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads] = await Promise.all([
+      Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+      !isOnHold ? Cnp.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([]),
+      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+      !isOnHold ? CallAgain.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([])
+    ]);
+
+    const toObjectIds = (arr) => [...new Set(arr.filter(Boolean).map(id => String(id)))]
+      .filter(id => id !== 'null' && id !== 'undefined' && mongoose.isValidObjectId(id))
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    const excludeLeadIds = toObjectIds([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads, ...activeCallAgainLeads]);
+      
+    if (isOnHold) {
+       query.$and = query.$and || [];
+       query.$and.push({
+         $or: [
+           { _id: { $nin: toObjectIds(activeTaskLeads) } },
+           { _id: { $in: toObjectIds(activeVerLeads) }, cnp: { $ne: true } }
+         ]
+       });
+    } else {
+       query._id = { $nin: excludeLeadIds };
+    }
+    
+    pipeline[0].$match = query;
+  }
+
+  pipeline.push({ $sort: sortCriteria });
+
+  const StatusModel = getStatusModel(filter.status);
+  if (StatusModel) {
+    const leadQuery = { ...pipeline[0].$match, isArchived: { $ne: true } };
+    const statusQuery = { ...pipeline[0].$match, isArchived: { $ne: true }, isDeleted: { $ne: true } };
+    delete statusQuery.cnp; // CNP filter not relevant once record has transitioned into status collection
+    delete statusQuery.status; // All records in a dedicated StatusModel belong to that section regardless of alias naming (closed_lost vs not_interested)
+
+
+    const [statusLeads, legacyLeads] = await Promise.all([
+      StatusModel.find(statusQuery)
+        .select('-notes -follow_ups')
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean(),
+      Lead.find(leadQuery)
+        .select('-notes -follow_ups')
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean()
+    ]);
+
+    const seen = new Set();
+    const merged = [...statusLeads, ...legacyLeads].filter(item => {
+      if ((!item.name && item.title) || item.originalCollection === 'tasks' || item.transferredFrom === 'tasks') {
+        StatusModel.deleteMany({ _id: item._id }).catch(() => {});
+        return false;
+      }
+      const idStr = String(item._id);
+      if (seen.has(idStr)) return false;
+      seen.add(idStr);
+      return true;
+    });
+
+    merged.sort((a, b) => {
+      const dateA = new Date(a.updatedAt || a.createdAt || 0);
+      const dateB = new Date(b.updatedAt || b.createdAt || 0);
+      return sortCriteria.updatedAt === -1 || sortCriteria.createdAt === -1 ? dateB - dateA : dateA - dateB;
+    });
+
+    const totalCount = merged.length;
+    const allLeads = !isExport ? merged.slice(skip, skip + limit) : merged;
+    return { leads: allLeads, total: totalCount, page: !isExport ? page : 1, limit: !isExport ? limit : (totalCount || 1), totalPages: !isExport ? Math.ceil(totalCount / (limit || 1)) : 1 };
+  }
+
+  if (!isExport) {
+    const selectFields = isWhatsapp ? '-follow_ups' : '-notes -follow_ups';
+    const [leads, total] = await Promise.all([
+      Lead.find(pipeline[0].$match)
+        .sort(sortCriteria).skip(skip).limit(limit)
+        .select(selectFields)
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean(),
+      Lead.countDocuments(pipeline[0].$match)
+    ]);
+
+    // For whatsapp view: trim notes to only direction+createdAt+text for performance
+    if (isWhatsapp) {
+      leads.forEach(lead => {
+        if (lead.notes && lead.notes.length > 0) {
+          lead.notes = lead.notes.slice(-20).map(n => ({
+            direction: n.direction,
+            createdAt: n.createdAt,
+            text: n.text ? n.text.substring(0, 80) : ''
+          }));
+        }
+      });
+    }
+
+    return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
+  } else {
+    const leads = await Lead.find(pipeline[0].$match)
+      .populate('assignedTo', 'name email role')
+      .populate('createdBy', 'name email')
+      .sort(sortCriteria)
+      .lean();
+    return { leads, total: leads.length, page: 1, limit: leads.length, totalPages: 1 };
+  }
+};
+
+export const getLeadById = async (id, userRole, userId, userDepartments = []) => {
+  const resolved = await resolveLeadDocument(id, true);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
+  // Sales can view shared-status leads (interested, closed_lost, on_hold, cnp) from all staff
+  const sharedStatuses = ['interested', 'closed_lost', 'on_hold', 'cnp'];
+  
+  if (userRole === 'sales') {
+    // Removed department restriction so sales can view leads assigned to them
+    if (!sharedStatuses.includes(lead.status) && String(lead.assignedTo?._id) !== String(userId)) {
+      // Allow access if there is a CNP task for this lead in the user's department
+      const hasCnpAccess = await Cnp.exists({
+        lead: lead._id,
+        $or: [ { department: { $in: userDepartments || [] } }, { department: null } ]
+      });
+      // Allow access if there is a Call Again task for this lead in the user's department
+      const hasCallAgainAccess = await CallAgain.exists({
+        lead: lead._id,
+        $or: [ { department: { $in: userDepartments || [] } }, { department: null } ]
+      });
+      
+      if (!hasCnpAccess && !hasCallAgainAccess) {
+        throw new ApiError(httpStatus.FORBIDDEN, 'Access denied');
+      }
+    }
+  }
+  return lead;
+};
+
+export const updateLead = async (id, data, userRole, userId, userDepartments = []) => {
+  const resolved = await resolveLeadDocument(id, false);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  let lead = resolved.doc;
+  
+  if (userRole === 'sales') {
+    // Removed department restriction so sales can edit leads assigned to them
+    if (!['closed_lost', 'interested', 'on_hold'].includes(data.status) && String(lead.assignedTo?._id) !== String(userId)) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'Access denied');
+    }
+  }
+  // Normalize assignedTo — accept object {_id} or string
+  if (data.assignedTo && typeof data.assignedTo === 'object') {
+    data.assignedTo = data.assignedTo._id;
+  }
+  if (data.department === '') delete data.department;
+  // Sales users can only assign to themselves
+  if (userRole === 'sales') {
+    data.assignedTo = new mongoose.Types.ObjectId(String(userId));
+  }
+  const oldStatus = lead.status;
+
+  const oldAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
+  const leadObjId = mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : id;
+  const matchIds = [id, leadObjId];
+
+  if (data.status && ['interested', 'on_hold', 'closed_lost', 'pending_order', 'verified_order', 'ready_to_shipment', 'dispatch', 'dispatched', 'closed_won', 'rejected'].includes(String(data.status).toLowerCase())) {
+    data.cnp = false;
+  }
+
+  // When clearing CNP flag (e.g. converting CNP to active task), soft-archive related CNP and CallAgain records and tasks with status 'cnp'
+  if (data.cnp === false) {
+    await Cnp.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await CallAgain.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await Task.updateMany(
+      { lead: { $in: matchIds }, status: 'cnp', isDeleted: false },
+      { $set: { isArchived: true, isDeleted: true } }
+    );
+  }
+
+  // When moving to terminal/pipeline stages, soft-archive related active tasks
+  if (data.status && data.status !== oldStatus && ['interested', 'on_hold', 'closed_lost', 'follow_up', 'pending_order', 'verified_order', 'ready_to_shipment', 'dispatch', 'dispatched'].includes(String(data.status).toLowerCase())) {
+    await Cnp.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await CallAgain.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await Task.updateMany(
+      { lead: { $in: matchIds }, status: { $in: ['pending', 'overdue', 'cnp', 'on_hold', 'verification'] }, isDeleted: false },
+      { $set: { isArchived: true, isDeleted: true } }
+    );
+  }
+
+
+  Object.assign(lead, data);
+  await lead.save();
+  await syncPilesLead(lead);
+
+  const newAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
+  if (oldAssignedTo !== newAssignedTo && newAssignedTo) {
+    const leadObjIdToUpdate = new mongoose.Types.ObjectId(String(id));
+    await Promise.all([
+      Task.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      Verification.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      Cnp.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      CallAgain.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+    ]).catch(err => console.error('Cascading reassignment error in updateLead:', err));
+  }
+
+  // Track the update event in Interakt
+  interaktService.trackEvent(lead._id, 'Lead Updated', {
+    status: lead.status,
+    department: lead.department,
+    ...data
+  }).catch(err => console.error('Failed to track event in Interakt', err));
+
+  // When moving out of on_hold back to active (new/interested), sync verification record
+  if (data.status && ['new', 'interested'].includes(data.status) && oldStatus === 'on_hold') {
+    const leadObjId = new mongoose.Types.ObjectId(String(id));
+    if (data.status === 'new') {
+      const details = {
+        houseNo: lead.houseNo,
+        cityVillage: lead.cityVillage,
+        cityVillageType: lead.cityVillageType,
+        postOffice: lead.postOffice,
+        district: lead.district,
+        state: lead.state,
+        pincode: lead.pincode,
+        landmark: lead.landmark,
+        address: lead.address,
+        problem: lead.problem,
+        phone: lead.phone
+      };
+
+      // Move back to pending in verification if record exists
+      await Verification.updateMany({ lead: leadObjId }, { status: 'pending', ...details });
+      const verRecords = await Verification.find({ lead: leadObjId });
+      for (const vr of verRecords) {
+        if (vr.task) await Task.findByIdAndUpdate(vr.task, { status: 'verification', isDeleted: false, ...details });
+      }
+      // Also restore any soft-deleted call tasks so they show in Action Required
+      await Task.updateMany(
+        { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp', 'on_hold'] }, isDeleted: true },
+        { 
+          status: data.forceVerification ? 'verification' : 'pending', 
+          isDeleted: false,
+          ...details
+        }
+      );
+    } else {
+      // Moving to interested - clean up verification so it shows in pipeline
+      await Verification.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } });
+      await Task.updateMany(
+        { lead: leadObjId, status: { $in: ['verification', 'pending', 'overdue', 'on_hold', 'cnp'] }, isDeleted: false },
+        { isDeleted: true }
+      );
+    }
+  }
+
+  // When marking interested from CNP, soft-delete pending/overdue tasks so lead shows in pipeline
+  if (data.status === 'interested' && data.cnp === false) {
+    const leadObjId = new mongoose.Types.ObjectId(String(id));
+    await Task.updateMany(
+      { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp'] }, isDeleted: false },
+      { isDeleted: true }
+    );
+  }
+
+  if (data.status && data.status !== oldStatus && lead.assignedTo) {
+    createNotification({
+      user: lead.assignedTo,
+      title: 'Lead Status Updated',
+      message: `Lead "${lead.name}" moved to ${data.status}.`,
+      type: 'lead_status_changed',
+      relatedLead: lead._id,
+    }).catch(() => {});
+    notifyAdmins({ title: 'Lead Status Updated', message: `Lead "${lead.name}" moved to ${data.status}.`, type: 'lead_status_changed', relatedLead: lead._id }).catch(() => {});
+  }
+  return lead;
+};
+
+export const markCNP = async (leadId, userRole, userId) => {
+  const resolved = await resolveLeadDocument(leadId);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
+  const realLeadId = lead._id;
+  lead.cnp = true;
+  lead.cnpCount = (lead.cnpCount || 0) + 1;
+  lead.cnpAt = new Date();
+  await lead.save();
+  await syncPilesLead(lead);
+
+  // Track CNP marked event in Interakt
+  interaktService.trackEvent(realLeadId, 'Lead Marked CNP', {
+    cnpCount: lead.cnpCount
+  }).catch(err => console.error('Failed to track event in Interakt', err));
+
+  // Mark any pending/overdue tasks for this lead as cnp
+  const tasks = await Task.find(
+    { lead: realLeadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false }
+  ).lean();
+
+  await Task.updateMany(
+    { lead: realLeadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false },
+    { status: 'cnp' }
+  );
+
+  // Create or update EXACTLY ONE Cnp record for this lead (upsert by lead ID to prevent duplicates)
+  const targetTask = tasks[0];
+  let taskId = targetTask?._id;
+  if (!taskId) {
+    const placeholderTask = await Task.create({
+      title: lead.name || 'Unknown Lead (CNP)',
+      type: 'call',
+      lead: realLeadId,
+      assignedTo: lead.assignedTo?._id || lead.assignedTo || userId,
+      createdBy: lead.createdBy?._id || lead.createdBy || userId,
+      department: lead.department,
+      dueDate: new Date(),
+      status: 'cnp',
+      isDeleted: false,
+    });
+    taskId = placeholderTask._id;
+  }
+
+  await Cnp.findOneAndUpdate(
+    { lead: realLeadId },
+    {
+      task: taskId,
+      title: targetTask?.title || lead.name || 'Unknown Lead (CNP)',
+      assignedTo: targetTask?.assignedTo || lead.assignedTo?._id || lead.assignedTo || userId,
+      lead: realLeadId,
+      dueDate: targetTask?.dueDate || new Date(),
+      department: lead.department || targetTask?.department || null,
+      cnpCount: lead.cnpCount || 1,
+      lastCnpAt: new Date(),
+      isDeleted: false,
+      isArchived: false
+    },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+  );
+
+  return lead;
+};
+
+export const unmarkCNP = async (leadId, userRole, userId) => {
+  const lead = await getLeadById(leadId, userRole, userId);
+  lead.cnp = false;
+  await lead.save();
+  await syncPilesLead(lead);
+  return lead;
+};
+
+export const deleteLead = async (id) => {
+  const resolved = await resolveLeadDocument(id);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
+  lead.isDeleted = true;
+  lead.deletedAt = new Date();
+  await lead.save();
+  await syncPilesLead(lead);
+
+  // Cascading soft-delete associated records
+  const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+  await Promise.all([
+    Task.updateMany({ lead: leadObjId, isDeleted: false }, { isDeleted: true, deletedAt: new Date() }),
+    Verification.updateMany({ lead: leadObjId, isDeleted: false }, { isDeleted: true, deletedAt: new Date() }),
+    Cnp.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } }),
+    CallAgain.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } }),
+  ]).catch(err => console.error('Cascading delete error:', err));
+};
+
+export const assignLead = async (leadId, assignedTo) => {
+  const resolved = await resolveLeadDocument(leadId);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
+  lead.assignedTo = assignedTo;
+  await lead.save();
+  await syncPilesLead(lead);
+
+  // Track assigned event in Interakt
+  interaktService.trackEvent(lead._id, 'Lead Assigned', {
+    assignedTo: assignedTo
+  }).catch(err => console.error('Failed to track event in Interakt', err));
+
+  await createNotification({
+    user: assignedTo,
+    title: 'Lead Assigned',
+    message: `Lead "${lead.name}" has been assigned to you.`,
+    type: 'lead_assigned',
+    relatedLead: lead._id,
+  });
+
+  // Auto-create call task only if no active task already exists for this lead
+  const existingCallTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+  if (!existingCallTask) {
+    const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    await Task.create({
+      title: lead.name,
+      description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+      type: 'call',
+      lead: lead._id,
+      assignedTo,
+      createdBy: assignedTo,
+      department: lead.department,
+      dueDate,
+      priority: 'high',
+      status: 'pending',
+      isDeleted: false,
+    });
+  }
+
+  // Update associated records to new assignedTo
+  const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+  await Promise.all([
+    Task.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+  ]).catch(err => console.error('Cascading reassignment error:', err));
+
+  return lead;
+};
+

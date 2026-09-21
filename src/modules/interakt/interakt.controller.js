@@ -1,0 +1,427 @@
+import httpStatus from 'http-status';
+import catchAsync from '../../utils/catchAsync.js';
+import ApiResponse from '../../utils/ApiResponse.js';
+import Lead from '../lead/lead.model.js';
+import User from '../user/user.model.js';
+import * as leadService from '../lead/lead.service.js';
+import streamifier from 'streamifier';
+import cloudinary from '../../config/cloudinary.js';
+import { sendWhatsAppMessage, sendInteraktChatMessage, getApprovedTemplates } from './interakt.service.js';
+import { createNotification } from '../notification/notification.service.js';
+import { Order } from '../shiprocket/models/order.model.js';
+import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
+import { detectDepartmentFromText } from '../../utils/departmentKeywords.js';
+
+const processingWebhooks = new Set();
+
+/**
+ * Handle incoming webhooks from Interakt
+ */
+const handleWebhook = catchAsync(async (req, res) => {
+  const payload = req.body;
+
+  console.log(`[Interakt Webhook] Received:`, JSON.stringify(payload, null, 2));
+
+  if (!payload || (!payload.entityType && !payload.type)) {
+    return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'Invalid payload'));
+  }
+
+  try {
+    const isMessage = payload.entityType === 'USER_MESSAGE' || payload.type === 'message_received';
+    
+    if (isMessage) {
+      let phone, messageText, customerName, targetDepartment = null;
+      
+      if (payload.type === 'message_received' && payload.data) {
+        phone = payload.data.customer?.phone_number || payload.data.customer?.phone;
+        customerName = payload.data.customer?.traits?.name || `WhatsApp Lead (${phone})`;
+        
+        const msgObj = payload.data.message;
+        let extractedText = "";
+        
+        if (typeof msgObj?.message === 'string') {
+          extractedText = msgObj.message;
+        } else if (msgObj?.message?.text) {
+          extractedText = msgObj.message.text;
+        } else if (msgObj?.text) {
+          extractedText = msgObj.text;
+        } else if (msgObj?.type === 'button' && msgObj.button?.text) {
+          extractedText = `[Button Reply] ${msgObj.button.text}`;
+        } else if (msgObj?.type === 'interactive') {
+          if (msgObj.interactive?.type === 'button_reply') {
+            extractedText = `[Button Reply] ${msgObj.interactive.button_reply?.title || ''}`;
+          } else if (msgObj.interactive?.type === 'list_reply') {
+            extractedText = `[List Selection] ${msgObj.interactive.list_reply?.title || ''}`;
+          } else if (msgObj.interactive?.button_reply?.title) {
+            extractedText = `[Button Reply] ${msgObj.interactive.button_reply.title}`;
+          }
+        } else if (msgObj?.type === 'image' || msgObj?.image || msgObj?.message_content_type === 'Image') {
+          const mediaUrl = msgObj?.media_url || msgObj?.image?.link || msgObj?.image?.url || '';
+          const caption = msgObj?.message || msgObj?.image?.caption || '';
+          extractedText = mediaUrl ? `[Image: ${mediaUrl}]${caption ? ' ' + caption : ''}` : '[Image Attached]';
+        } else if (msgObj?.type === 'video' || msgObj?.video || msgObj?.message_content_type === 'Video') {
+          const mediaUrl = msgObj?.media_url || msgObj?.video?.link || msgObj?.video?.url || '';
+          const caption = msgObj?.message || msgObj?.video?.caption || '';
+          extractedText = mediaUrl ? `[Video: ${mediaUrl}]${caption ? ' ' + caption : ''}` : '[Video Attached]';
+        } else if (msgObj?.type === 'audio' || msgObj?.audio || msgObj?.message_content_type === 'Audio') {
+          const mediaUrl = msgObj?.media_url || msgObj?.audio?.link || msgObj?.audio?.url || '';
+          extractedText = mediaUrl ? `[Audio: ${mediaUrl}]` : '[Audio Attached]';
+        } else if (msgObj?.type === 'document' || msgObj?.document || msgObj?.message_content_type === 'Document') {
+          const mediaUrl = msgObj?.media_url || msgObj?.document?.link || msgObj?.document?.url || '';
+          const filename = msgObj?.document?.filename || '';
+          extractedText = mediaUrl ? `[Document: ${mediaUrl}]${filename ? ' ' + filename : ''}` : '[Document Attached]';
+        } else if (msgObj?.type === 'location' || msgObj?.location) {
+          extractedText = '[Location Attached]';
+        } else if (msgObj?.type === 'contacts' || msgObj?.contacts) {
+          extractedText = '[Contact Attached]';
+        }
+
+        let referralText = "";
+        if (msgObj?.referral?.headline) {
+          referralText = `\n[Clicked Ad: ${msgObj.referral.headline}]`;
+        }
+
+        messageText = extractedText ? (extractedText + referralText).trim() : (msgObj ? `[${msgObj.type || 'Media/File'} Received]` : "New message received");
+
+        let businessPhone = payload.data?.customer?.channel_phone_number || "";
+        
+        const fallbackMale = "7309523829,917309523829,916376776399,6376776399";
+        const maleNumbers = (process.env.INTERAKT_MALE_NUMBERS || fallbackMale).split(",");
+        const haircareNumbers = (process.env.INTERAKT_HAIRCARE_NUMBERS || "").split(",");
+        
+        // 1. Keyword based routing (Highest Priority) - Supports Hindi, Hinglish, & English
+        const detectedDept = detectDepartmentFromText(messageText);
+        if (detectedDept) {
+            targetDepartment = detectedDept;
+        }
+        // 2. Business Phone Number based routing (Fallback)
+        else if (businessPhone && maleNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
+            targetDepartment = 'male';
+        } else if (businessPhone && haircareNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
+            targetDepartment = 'haircare';
+        }
+        
+      } else {
+        phone = payload.userPhoneNumber;
+        customerName = `WhatsApp Lead (${phone})`;
+        messageText = payload.message?.text || payload.entity?.text || payload.entity?.suggestionResponse?.postBack?.data || "New message received";
+      }
+
+      console.log(`[Interakt Webhook] User ${customerName} (${phone}) | dept: ${targetDepartment}`);
+      
+      if (phone && messageText) {
+        // Normalize phone — strip +91 / 91 country code prefix, keep last 10 digits
+        let normalizedPhone = phone.replace(/\s+/g, '');
+        if (normalizedPhone.startsWith('+91')) normalizedPhone = normalizedPhone.substring(3);
+        else if (normalizedPhone.startsWith('91') && normalizedPhone.length === 12) normalizedPhone = normalizedPhone.substring(2);
+        normalizedPhone = normalizedPhone.slice(-10); // always use last 10 digits
+
+        let retries = 0;
+        while (processingWebhooks.has(normalizedPhone) && retries < 50) {
+          await new Promise(r => setTimeout(r, 100));
+          retries++;
+        }
+        processingWebhooks.add(normalizedPhone);
+
+        try {
+          const cleanReplyText = messageText.replace(/^\[(?:Button Reply|List Selection)\]\s*/i, '').trim();
+          const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+        
+        // Save WhatsApp reply directly to any active/recent shipments for Ops Dashboard tracking
+        try {
+          await Promise.all([
+            Order.updateMany(
+              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
+              { 
+                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
+                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
+              }
+            ),
+            ShipmaxxOrder.updateMany(
+              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
+              { 
+                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
+                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
+              }
+            )
+          ]);
+          console.log(`[Interakt Webhook] Updated shipments for phone ${normalizedPhone} with reply: ${cleanReplyText}`);
+        } catch (shipErr) {
+          console.error('[Interakt Webhook] Failed to update shipment reply:', shipErr.message);
+        }
+
+        // Search across all active (non-deleted) leads across all status collections
+        const statusModels = await import('../transition/statusModels.js');
+        const allModels = [Lead, statusModels.InterestedLead, statusModels.NotInterestedLead, statusModels.OnHoldOrder, statusModels.PendingOrder, statusModels.VerifiedOrder];
+        let lead = null;
+        for (const Model of allModels) {
+          if (!Model) continue;
+          lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true }, isArchived: { $ne: true } });
+          if (lead) break;
+        }
+
+        // Fallback 1: If only an archived lead exists
+        if (!lead) {
+          for (const Model of allModels) {
+            if (!Model) continue;
+            lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+            if (lead) break;
+          }
+        }
+
+        // Fallback 2: Even if deleted, find it to strictly prevent duplicates
+        if (!lead) {
+          for (const Model of allModels) {
+            if (!Model) continue;
+            lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' } });
+            if (lead) break;
+          }
+          if (lead && lead.isDeleted) {
+            // Undelete it so staff can see they replied again
+            lead.isDeleted = false;
+            // Optionally reset status if needed, but keeping existing status is usually safer unless it's lost
+          }
+        }
+
+        const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();
+        
+        if (!lead) {
+          console.log(`[Interakt Webhook] Auto-creating new lead for phone ${normalizedPhone}`);
+          const newLeadData = {
+            name: customerName,
+            phone: normalizedPhone,
+            source: 'social_media',
+            department: targetDepartment,
+            problem: `[Interakt Message] ${messageText}`,
+            status: 'new'
+          };
+          
+          try {
+            const createdLead = await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+            if (defaultAdmin) {
+              await createNotification({
+                user: defaultAdmin._id,
+                title: 'New WhatsApp Lead',
+                message: `${createdLead.name || createdLead.phone} replied: ${messageText}`,
+                type: 'lead_assigned',
+                relatedLead: createdLead._id
+              });
+            }
+          } catch (createErr) {
+            // If duplicate phone conflict — find that lead and add a note instead
+            if (createErr.statusCode === 409 || createErr.message?.includes('already exists')) {
+              console.log(`[Interakt Webhook] Lead already exists (race condition) — adding note instead`);
+              lead = null;
+              for (const Model of allModels) {
+                if (!Model) continue;
+                lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' } }); // strict find everywhere
+                if (lead) break;
+              }
+              if (lead) {
+                if (lead.isDeleted) lead.isDeleted = false; // Undelete just in case
+                
+                const hadUnread = lead.hasUnreadReply;
+                lead.notes.push({ text: `[Interakt Message] ${messageText}`, direction: 'inbound' });
+                lead.hasUnreadReply = true;
+                await lead.save();
+                
+                if (!hadUnread) {
+                  const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+                  if (notifyUser) {
+                    await createNotification({
+                      user: notifyUser,
+                      title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
+                      message: `${lead.name || lead.phone} replied: ${messageText}`,
+                      type: 'task',
+                      relatedLead: lead._id
+                    });
+                    if (defaultAdmin && notifyUser.toString() !== defaultAdmin._id.toString()) {
+                      await createNotification({
+                        user: defaultAdmin._id,
+                        title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
+                        message: `${lead.name || lead.phone} replied: ${messageText}`,
+                        type: 'task',
+                        relatedLead: lead._id
+                      });
+                    }
+                  }
+                }
+              }
+            } else {
+              throw createErr;
+            }
+          }
+        } else {
+          console.log(`[Interakt Webhook] Adding note to existing lead ${lead._id}`);
+          const hadUnread = lead.hasUnreadReply;
+          
+          lead.notes.push({
+            text: `[Interakt Message] ${messageText}`,
+            direction: 'inbound',
+          });
+          lead.hasUnreadReply = true;
+          await lead.save();
+          console.log(`[Interakt Webhook] Lead found, lastMessageWasBulk: ${lead.lastMessageWasBulk}`);
+
+          if (!hadUnread) {
+            const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+            const titleStr = lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply';
+            const messageStr = `${lead.name || lead.phone} replied: ${messageText}`;
+            
+            if (notifyUser) {
+              console.log(`[Interakt Webhook] Creating notification for user ${notifyUser} with title ${titleStr}`);
+              await createNotification({
+                user: notifyUser,
+                title: titleStr,
+                message: messageStr,
+                type: 'task',
+                relatedLead: lead._id
+              });
+            }
+
+            if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString()) {
+              console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Reply`);
+              await createNotification({
+                user: defaultAdmin._id,
+                title: titleStr,
+                message: messageStr,
+                type: 'task',
+                relatedLead: lead._id
+              });
+            }
+          }
+        }
+        } finally {
+          processingWebhooks.delete(normalizedPhone);
+        }
+      }
+    } else {
+      console.log(`[Interakt Webhook] Received unhandled event: ${payload.entityType || payload.type}`);
+    }
+  } catch (error) {
+    console.error(`[Interakt Webhook Error]`, error);
+  }
+
+  // Always return 200 OK to acknowledge receipt of the webhook to Interakt
+  res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, null, 'Webhook received successfully'));
+});
+
+/**
+ * Send a WhatsApp message to a lead via Interakt
+ */
+const sendMessage = catchAsync(async (req, res) => {
+  const { leadId, message, templateName, languageCode, useStandardChat } = req.body;
+
+  if (!leadId) {
+    return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'leadId is required'));
+  }
+
+  const lead = await Lead.findById(leadId);
+  if (!lead) {
+    return res.status(httpStatus.NOT_FOUND).json(new ApiResponse(httpStatus.NOT_FOUND, null, 'Lead not found'));
+  }
+
+  let mediaUrl = null;
+
+  // Handle file upload if present
+  if (req.file) {
+    try {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'interakt-media',
+            resource_type: 'auto'
+          },
+          (error, result) => {
+            if (error) return reject(new Error('Cloudinary upload failed'));
+            resolve(result);
+          }
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(uploadStream);
+      });
+      mediaUrl = uploadResult.secure_url;
+    } catch (error) {
+      console.error('[Cloudinary Error]', error);
+      return res.status(httpStatus.INTERNAL_SERVER_ERROR).json(new ApiResponse(httpStatus.INTERNAL_SERVER_ERROR, null, 'Failed to upload media'));
+    }
+  }
+
+  // Send WhatsApp via Interakt
+  let interaktResult = null;
+  try {
+    if (mediaUrl || useStandardChat === 'true' || useStandardChat === true) {
+      // Use standard chat message API for attachments
+      interaktResult = await sendInteraktChatMessage({
+        phone: lead.phone,
+        messageText: message || '',
+        mediaUrl: mediaUrl
+      });
+    } else {
+      // Use standard template API
+      if (!message) {
+        return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'message is required for templates'));
+      }
+      interaktResult = await sendWhatsAppMessage({
+        phone: lead.phone,
+        messageText: message,
+        templateName,
+        languageCode,
+      });
+    }
+  } catch (err) {
+    console.error('[Interakt] sendMessage failed:', err?.response?.data || err.message);
+    // Don't block — still save the note so staff have a record
+    interaktResult = { error: err?.response?.data?.message || err.message };
+  }
+
+  // Save outbound note
+  const sentBy = req.user?._id || null;
+  
+  let noteText = message || '';
+  if (interaktResult && interaktResult.error) {
+    noteText = `[FAILED] ${noteText}`;
+  }
+  if (mediaUrl) {
+    noteText = `[Attached Media: ${mediaUrl}] ${noteText}`;
+  }
+
+  lead.notes.push({
+    text: noteText,
+    createdBy: sentBy,
+    direction: 'outbound',
+  });
+  await lead.save();
+
+  const savedNote = lead.notes[lead.notes.length - 1];
+  return res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, { note: savedNote, interaktResult }, 'Message sent'));
+});
+
+export default {
+  handleWebhook,
+  sendMessage,
+  testWebhook: catchAsync(async (req, res) => {
+    let lead = await Lead.findOne({ phone: "8888888888" });
+    const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();
+    if (!lead) {
+      const newLeadData = {
+        name: `WhatsApp Lead (8888888888)`,
+        phone: "8888888888",
+        source: 'social_media',
+        problem: `[Interakt Message] TEST`,
+        status: 'new'
+      };
+      lead = await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+      res.status(200).json({ success: true, message: "Lead CREATED", lead });
+    } else {
+      res.status(200).json({ success: true, message: "Lead ALREADY EXISTS", lead });
+    }
+  }),
+  latestLeads: catchAsync(async (req, res) => {
+    const leads = await Lead.find({ source: 'social_media' }).sort({ createdAt: -1 }).limit(10).lean();
+    res.status(200).json({ success: true, leads });
+  }),
+  getTemplates: catchAsync(async (req, res) => {
+    const templates = await getApprovedTemplates();
+    res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, { templates }, 'Templates fetched successfully'));
+  })
+};

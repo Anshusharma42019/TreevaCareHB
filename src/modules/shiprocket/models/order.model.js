@@ -1,0 +1,93 @@
+import mongoose from 'mongoose';
+
+const orderItemSchema = new mongoose.Schema({
+  name: String, sku: String, units: Number,
+  selling_price: mongoose.Schema.Types.Mixed,
+  discount: String, tax: String, hsn: String,
+}, { _id: false });
+
+const orderSchema = new mongoose.Schema({
+  shiprocket_order_id: { type: Number, unique: true, sparse: true, index: true },
+  shiprocket_shipment_id: { type: Number, index: true },
+  order_id: { type: String, unique: true, sparse: true },
+  order_date: String,
+  status: { type: String, default: 'NEW' },
+  status_code: Number,
+  awb_code: String,
+  courier_id: Number,
+  courier_name: String,
+  pickup_location: String,
+  billing_customer_name: String,
+  billing_phone: String,
+  billing_email: String,
+  billing_address: String,
+  billing_city: String,
+  billing_state: String,
+  billing_pincode: mongoose.Schema.Types.Mixed,
+  billing_country: { type: String, default: 'India' },
+  shipping_is_billing: { type: Boolean, default: true },
+  shipping_address: String,
+  shipping_city: String,
+  shipping_state: String,
+  shipping_pincode: mongoose.Schema.Types.Mixed,
+  order_items: [orderItemSchema],
+  payment_method: String,
+  sub_total: Number,
+  length: Number, breadth: Number, height: Number, weight: Number,
+  label_url: String,
+  lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
+  created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  task_created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  verified_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  verification_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Verification',
+    default: null,
+  },
+  commission_generated: { type: Boolean, default: false, index: true },
+  commission_generated_at: Date,
+  follow_ups: [{
+    date: Date,
+    note: String,
+    auto: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now },
+  }],
+  next_follow_up: Date,
+  delivered_at: { type: Date, index: true },
+  auto_followups_set: { type: Boolean, default: false },
+  problem: { type: String, default: '' },
+  notes: { type: String, default: '' },
+  comments: [{
+    text: { type: String, required: true },
+    type: { type: String, enum: ['general', 'followup'], default: 'general' },
+    section: { type: String, default: '' },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now },
+  }],
+  status_updated_at: { type: Date, index: true },
+  followup_done: { type: Boolean, default: false },
+  sent_to_verification: { type: Boolean, default: false },
+  // If this order was created from a re-verification cycle, track the original order
+  source_order_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ShiprocketOrder', default: null },
+  reorder_commission_generated: { type: Boolean, default: false },
+  delivery_attempt: { type: Number, default: 1 },
+  department: { type: String, enum: ['male', 'ortho', 'skin'], default: null, index: true },
+  platform: { type: String, enum: ['shiprocket', 'shipmaxx'], default: 'shiprocket', index: true },
+  rto_verification_action: { type: String, enum: ['wants_again', 'no_need'], default: null },
+  interakt_reply_text: { type: String, default: null, index: true },
+  interakt_reply_at: { type: Date, default: null },
+  interakt_reply_read: { type: Boolean, default: false },
+  bill_number: { type: String, index: true },
+  bill_seq: { type: Number, index: true },
+  raw_response: mongoose.Schema.Types.Mixed,
+}, { timestamps: true });
+
+orderSchema.index({ status: 1, createdAt: -1 });
+orderSchema.index({ status: 1, delivered_at: -1 });
+orderSchema.index({ lead_id: 1, createdAt: -1 });
+orderSchema.index({ status: 1, status_updated_at: -1 });
+export const Order = mongoose.model('ShiprocketOrder', orderSchema);
