@@ -2,11 +2,11 @@ import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import * as svc from './opsDashboard.service.js';
 
-const OVERALL_ROLES = ['admin', 'manager', 'logistics', 'sales', 'staff'];
+const OVERALL_ROLES = ['admin', 'manager'];
 
 function extractParams(req) {
   const isOverall = OVERALL_ROLES.includes(req.user?.role) && req.query.my_data_only !== 'true';
-  // Admin/Manager/Sales/Staff → see department data (staffId = null) unless my_data_only is requested
+  // Admin/Manager → see department data (staffId = null) unless my_data_only is requested
   const staffId = isOverall ? null : String(req.user?._id);
   const department = req.query.department || req.user?.departments?.[0] || req.user?.department || null;
 
