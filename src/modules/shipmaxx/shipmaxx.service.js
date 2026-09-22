@@ -7,8 +7,8 @@ const AUTH_URL = config.shipmaxx.authUrl;
 
 let _email;
 let _password;
-let _apiKey;
-let _tokenExpiresAt = 0;   // Unix ms — when the cached token expires
+let _apiKey = config.shipmaxx.apiKey || null;
+let _tokenExpiresAt = config.shipmaxx.apiKey ? (Date.now() + 23 * 60 * 60 * 1000) : 0;   // Unix ms — when the cached token expires
 let _loginPromise = null;   // Guards against concurrent login attempts
 let _dynamicAuthUrl;
 
@@ -76,6 +76,9 @@ const post = (url, data)   => call('POST', url, { data });
 const put  = (url, data)   => call('PUT',  url, { data });
 
 export const login = async () => {
+  if (_apiKey && !isTokenExpired()) {
+    return _apiKey;
+  }
   const email = _email || config.shipmaxx.email;
   const password = _password || config.shipmaxx.password;
 

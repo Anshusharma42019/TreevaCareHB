@@ -153,7 +153,9 @@ export const runCronSync = async () => {
         page++;
       }
     } catch (err) {
-      console.error('[Cron] Error fetching new ShipMaxx shipments:', err.message);
+      if (!err?.message?.includes('rejected credentials') && err?.statusCode !== 401) {
+        console.error('[Cron] Error fetching new ShipMaxx shipments:', err.message);
+      }
     }
 
     // 1.5. Fetch new orders from ShipMaxx (Auto-sync new unshipped orders)
@@ -240,7 +242,9 @@ export const runCronSync = async () => {
       }
       console.log(`[Cron] Fetching new orders done`);
     } catch (err) {
-      console.error('[Cron] Error fetching new ShipMaxx orders:', err.message);
+      if (!err?.message?.includes('rejected credentials') && err?.statusCode !== 401) {
+        console.error('[Cron] Error fetching new ShipMaxx orders:', err.message);
+      }
     }
 
     const activeOrders = await Order.find({
@@ -361,7 +365,11 @@ export const runCronSync = async () => {
     }
 
   } catch (error) {
-    console.error('[Cron] ShipMaxx auto-sync error:', error.message);
+    if (error?.statusCode === 401 || error?.message?.includes('rejected credentials')) {
+      // Suppress repetitive background auth error logs
+    } else {
+      console.error('[Cron] ShipMaxx auto-sync error:', error.message);
+    }
   }
 };
 

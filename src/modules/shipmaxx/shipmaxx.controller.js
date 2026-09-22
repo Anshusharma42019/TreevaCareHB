@@ -192,7 +192,10 @@ export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
 export const login = catchAsync(async (req, res) => {
   const { email, password, api_key, base_url } = req.body;
   if (base_url) smx.setAuthUrl(base_url);
-  if (api_key) smx.setApiKey(api_key);
+  if (api_key) {
+    smx.setApiKey(api_key);
+    return res.json(new ApiResponse(200, { token: api_key }, 'ShipMaxx API key set successfully'));
+  }
   if (email && password) smx.setCredentials(email, password);
 
   const token = await smx.login();

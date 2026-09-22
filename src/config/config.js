@@ -23,6 +23,7 @@ const envVarsSchema = z.object({
   SHIPMAXX_AUTH_URL: z.string().optional().default('https://appapi.losung360.com/external/v1'),
   SHIPMAXX_EMAIL: z.string().optional().default(''),
   SHIPMAXX_PASSWORD: z.string().optional().default(''),
+  SHIPMAXX_API_KEY: z.string().optional().default(''),
   SHIPROCKET_BASE_URL: z.string().optional().default('https://apiv2.shiprocket.in/v1/external'),
   SHIPROCKET_EMAIL: z.string().optional().default(''),
   SHIPROCKET_PASSWORD: z.string().optional().default(''),
@@ -68,6 +69,7 @@ export const config = {
     authUrl: envVars.data.SHIPMAXX_AUTH_URL,
     email: envVars.data.SHIPMAXX_EMAIL,
     password: envVars.data.SHIPMAXX_PASSWORD,
+    apiKey: envVars.data.SHIPMAXX_API_KEY,
   },
   shiprocket: {
     baseUrl: envVars.data.SHIPROCKET_BASE_URL,
