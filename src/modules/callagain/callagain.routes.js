@@ -38,7 +38,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     }
     const limitVal = parseInt(req.query.limit) || 200;
     const records = await CallAgain.find(query)
-      .populate('lead', 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue cnpCount cnpAt note createdAt department')
+      .populate('lead', 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue cnpCount cnpAt note createdAt department prescribedMedicines')
       .populate('assignedTo', 'name email')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })

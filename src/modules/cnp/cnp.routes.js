@@ -50,7 +50,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     const limitVal = parseInt(req.query.limit) || 200;
     const records = await Cnp.find(query)
       .populate('assignedTo', 'name email departments')
-      .populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department')
+      .populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department gender occupation maritalStatus age weight problemDuration prescribedMedicines')
       .sort({ createdAt: -1 })
       .limit(limitVal);
 
@@ -96,7 +96,7 @@ router.patch('/:id/increment', auth('admin', 'manager', 'sales', 'support'), dep
       req.params.id,
       { $inc: { cnpCount: 1 }, lastCnpAt: new Date(), $push: { cnpHistory: { clickedAt: new Date() } } },
       { returnDocument: 'after' }
-    ).populate('assignedTo', 'name email').populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department');
+    ).populate('assignedTo', 'name email').populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department gender occupation maritalStatus age weight problemDuration prescribedMedicines');
     res.json({ status: 200, data: record });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });

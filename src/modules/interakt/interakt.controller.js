@@ -27,7 +27,15 @@ const handleWebhook = catchAsync(async (req, res) => {
   }
 
   try {
-    const isMessage = payload.entityType === 'USER_MESSAGE' || payload.type === 'message_received';
+    const isMessage = 
+      payload.entityType === 'USER_MESSAGE' || 
+      payload.type === 'message_received' ||
+      payload.type === 'inbound_message' ||
+      payload.type === 'user_message_received' ||
+      payload.type === 'customer_created' ||
+      payload.type === 'user_created' ||
+      payload.type === 'message_created' ||
+      payload.data?.type === 'message';
     
     if (isMessage) {
       let phone, messageText, customerName, targetDepartment = null;

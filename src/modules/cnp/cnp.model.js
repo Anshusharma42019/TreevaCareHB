@@ -16,6 +16,9 @@ const cnpSchema = new mongoose.Schema(
     pincode: { type: String },
     state: { type: String },
     address: { type: String },
+    gender: { type: String },
+    occupation: { type: String },
+    maritalStatus: { type: String },
     notes: [{ text: String, createdAt: { type: Date, default: Date.now } }],
     department: {
       type: String,

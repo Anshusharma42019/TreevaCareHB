@@ -14,7 +14,12 @@ export const MALE_KEYWORDS = [
   'शीघ्रपतन', 'जल्दी डिस्चार्ज', 'jaldi discharge', 'सेक्स टाइम', 'sex timing', 'sex time', 
   'libido', 'libido low', 'कामेच्छा', 'sex drive', 'पेशाब', 'peshab', 'mard', 'mardana', 
   'mardana kamzori', 'mard ki kamzori', 'mardon ki problem', 'mardana taqat', 'youn', 'youn shakti',
-  'peshab ki problem', 'mardanag'
+  'peshab ki problem', 'mardanag',
+  // Sperm Count & Shukranu Keywords (Hindi, Hinglish & English)
+  'स्पर्म', 'स्पर्म काउंट', 'स्पर्म काउंट की समस्या', 'कम स्पर्म काउंट', 'जीरो स्पर्म काउंट',
+  'शुक्राणु', 'शुक्राणु की कमी', 'शुक्राणु जांच', 'शुक्राणु की समस्या',
+  'sperm', 'sperm count', 'sperm count ki samasya', 'kam sperm count', 'zero sperm count', 
+  'low sperm', 'low sperm count', 'shukranu', 'shukranu ki kami', 'shukranu janch', 'shukranu jaanch'
 ];
 
 export const ORTHO_KEYWORDS = [

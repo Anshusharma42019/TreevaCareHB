@@ -38,6 +38,9 @@ const taskSchema = new mongoose.Schema(
     age: { type: Number },
     weight: { type: Number },
     height: { type: Number },
+    gender: { type: String, trim: true, default: '' },
+    occupation: { type: String, trim: true, default: '' },
+    maritalStatus: { type: String, trim: true, default: '' },
     otherProblems: { type: String },
     problemDuration: { type: String },
     price: { type: Number },
@@ -52,6 +55,16 @@ const taskSchema = new mongoose.Schema(
     },
     isDeleted: { type: Boolean, default: false },
     isArchived: { type: Boolean, default: false },
+    prescribedMedicines: [
+      {
+        id: { type: mongoose.Schema.Types.Mixed },
+        name: { type: String },
+        dosage: { type: String },
+        frequency: { type: String },
+        timing: { type: String },
+        duration: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );

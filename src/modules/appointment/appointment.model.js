@@ -38,6 +38,13 @@ const appointmentSchema = new mongoose.Schema(
       default: 'new',
     },
     problem: { type: String, trim: true },
+    age: { type: Number },
+    weight: { type: Number },
+    height: { type: Number },
+    gender: { type: String, trim: true, default: '' },
+    occupation: { type: String, trim: true, default: '' },
+    maritalStatus: { type: String, trim: true, default: '' },
+    problemDuration: { type: String, trim: true, default: '' },
     address: { type: String, trim: true },
     houseNo: { type: String, trim: true },
     cityVillage: { type: String, trim: true },
@@ -56,6 +63,16 @@ const appointmentSchema = new mongoose.Schema(
     lead: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     isDeleted: { type: Boolean, default: false },
+    prescribedMedicines: [
+      {
+        id: { type: mongoose.Schema.Types.Mixed },
+        name: { type: String },
+        dosage: { type: String },
+        frequency: { type: String },
+        timing: { type: String },
+        duration: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );

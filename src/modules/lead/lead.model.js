@@ -31,6 +31,14 @@ const leadSchema = new mongoose.Schema(
       enum: ['general', 'ayurveda', 'panchakarma', 'consultation', 'product', 'other'],
       default: 'general',
     },
+    gender: { type: String, trim: true, default: '' },
+    occupation: { type: String, trim: true, default: '' },
+    maritalStatus: { type: String, trim: true, default: '' },
+    age: { type: Number },
+    weight: { type: Number },
+    height: { type: Number },
+    problemDuration: { type: String, trim: true, default: '' },
+    price: { type: Number, default: 0 },
     revenue: { type: Number, default: 0 },
     cnp: { type: Boolean, default: false },
     cnpCount: { type: Number, default: 0 },
@@ -63,6 +71,16 @@ const leadSchema = new mongoose.Schema(
     isArchived: { type: Boolean, default: false },
     transferredTo: { type: String, default: null },
     transferredAt: { type: Date, default: null },
+    prescribedMedicines: [
+      {
+        id: { type: mongoose.Schema.Types.Mixed },
+        name: { type: String },
+        dosage: { type: String },
+        frequency: { type: String },
+        timing: { type: String },
+        duration: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );

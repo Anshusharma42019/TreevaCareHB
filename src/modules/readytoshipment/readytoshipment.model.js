@@ -20,6 +20,9 @@ const readyToShipmentSchema = new mongoose.Schema(
     age: { type: Number },
     weight: { type: Number },
     height: { type: Number },
+    gender: { type: String },
+    occupation: { type: String },
+    maritalStatus: { type: String },
     otherProblems: { type: String },
     problemDuration: { type: String },
     price: { type: Number },
@@ -31,6 +34,16 @@ const readyToShipmentSchema = new mongoose.Schema(
       default: null,
     },
     sentToShiprocket: { type: Boolean, default: false },
+    prescribedMedicines: [
+      {
+        id: { type: mongoose.Schema.Types.Mixed },
+        name: { type: String },
+        dosage: { type: String },
+        frequency: { type: String },
+        timing: { type: String },
+        duration: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );

@@ -40,6 +40,7 @@ export const updateLead = {
     assignedTo: z.string().optional(),
     cnp: z.boolean().optional(),
     department: z.enum(['male', 'ortho', 'skin']).optional().or(z.literal('')),
+    prescribedMedicines: z.any().optional(),
   }),
 };
 

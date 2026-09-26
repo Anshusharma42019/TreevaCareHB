@@ -348,7 +348,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
         .populate('assignedTo', 'name email')
         .populate({
           path: 'lead',
-          select: 'name phone status pending_reorder_source'
+          select: 'name phone status pending_reorder_source gender occupation maritalStatus age weight problemDuration address houseNo cityVillage district state pincode problem'
         })
         .populate('task', 'department')
         .sort({ createdAt: -1 })
@@ -379,18 +379,25 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
     const Verification = (await import('../verification/verification.model.js')).default;
 
      const taskQuery = { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, isDeleted: false };
-    if (req.query.department) {
-      taskQuery.department = req.query.department;
-      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
-        if (!req.userDepartments.includes(req.query.department)) taskQuery.department = "NOT_ALLOWED";
-      }
-    } else if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
-      taskQuery.department = { $in: req.userDepartments };
-    }
+
+     if (['sales', 'support', 'logistics', 'doctor'].includes(req.user.role)) {
+       const userDepts = req.userDepartments || (req.user?.departments?.length ? req.user.departments : req.user?.department ? [req.user.department] : []);
+       if (userDepts.length === 0) {
+         return res.json({ status: 200, data: [] });
+       }
+       if (req.query.department) {
+         if (!userDepts.includes(req.query.department)) taskQuery.department = "NOT_ALLOWED";
+         else taskQuery.department = req.query.department;
+       } else {
+         taskQuery.department = { $in: userDepts };
+       }
+     } else if (req.query.department) {
+       taskQuery.department = req.query.department;
+     }
 
     const [verifiedStuck, tasks] = await Promise.all([
-      Verification.find({ status: { $in: ['verified', 'dispatch', 'dispatched'] } }).populate('assignedTo', 'name email').populate('lead', 'name phone status createdBy assignedTo pending_reorder_source'),
-      Task.find(taskQuery).populate('assignedTo', 'name email').populate('lead', 'name phone status'),
+      Verification.find({ status: { $in: ['verified', 'dispatch', 'dispatched'] } }).populate('assignedTo', 'name email').populate('lead', 'name phone status createdBy assignedTo pending_reorder_source gender occupation maritalStatus age weight problemDuration prescribedMedicines'),
+      Task.find(taskQuery).populate('assignedTo', 'name email').populate('lead', 'name phone status gender occupation maritalStatus age weight problemDuration prescribedMedicines'),
     ]);
 
     await Promise.all([
@@ -400,7 +407,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
           Task.findByIdAndUpdate(v.task, { status: 'dispatch', assignedTo: rtsAssignedTo }),
           ReadyToShipment.findOneAndUpdate(
             { task: v.task },
-            { $set: { title: v.title, assignedTo: rtsAssignedTo, lead: v.lead?._id || v.lead, description: v.description, problem: v.problem, age: v.age, weight: v.weight, height: v.height, otherProblems: v.otherProblems, problemDuration: v.problemDuration, price: v.price, cityVillageType: v.cityVillageType, cityVillage: v.cityVillage, houseNo: v.houseNo, postOffice: v.postOffice, district: v.district, landmark: v.landmark, pincode: v.pincode, state: v.state, reminderAt: v.reminderAt }, $setOnInsert: { task: v.task } },
+            { $set: { title: v.title, assignedTo: rtsAssignedTo, lead: v.lead?._id || v.lead, description: v.description, problem: v.problem, age: v.age, weight: v.weight, height: v.height, gender: v.gender, occupation: v.occupation, maritalStatus: v.maritalStatus, otherProblems: v.otherProblems, problemDuration: v.problemDuration, price: v.price, cityVillageType: v.cityVillageType, cityVillage: v.cityVillage, houseNo: v.houseNo, postOffice: v.postOffice, district: v.district, landmark: v.landmark, pincode: v.pincode, state: v.state, reminderAt: v.reminderAt, prescribedMedicines: v.prescribedMedicines || v.lead?.prescribedMedicines }, $setOnInsert: { task: v.task } },
             { upsert: true }
           ),
         ]);
@@ -408,7 +415,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
       ...tasks.map(task =>
         ReadyToShipment.findOneAndUpdate(
           { task: task._id },
-          { $set: { title: task.title, assignedTo: task.assignedTo?._id, lead: task.lead?._id, description: task.description, problem: task.problem, age: task.age, weight: task.weight, height: task.height, otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price, cityVillageType: task.cityVillageType, cityVillage: task.cityVillage, houseNo: task.houseNo, postOffice: task.postOffice, district: task.district, landmark: task.landmark, pincode: task.pincode, state: task.state, reminderAt: task.reminderAt, notes: task.notes }, $setOnInsert: { task: task._id } },
+          { $set: { title: task.title, assignedTo: task.assignedTo?._id, lead: task.lead?._id, description: task.description, problem: task.problem, age: task.age, weight: task.weight, height: task.height, gender: task.gender, occupation: task.occupation, maritalStatus: task.maritalStatus, otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price, cityVillageType: task.cityVillageType, cityVillage: task.cityVillage, houseNo: task.houseNo, postOffice: task.postOffice, district: task.district, landmark: task.landmark, pincode: task.pincode, state: task.state, reminderAt: task.reminderAt, notes: task.notes, prescribedMedicines: task.prescribedMedicines || task.lead?.prescribedMedicines }, $setOnInsert: { task: task._id } },
           { upsert: true }
         )
       ),
@@ -416,7 +423,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
 
     const records = await ReadyToShipment.find({ sentToShiprocket: { $ne: true } })
       .populate('assignedTo', 'name email')
-      .populate('lead', 'name phone status')
+      .populate('lead', 'name phone status gender occupation maritalStatus age weight problemDuration prescribedMedicines')
       .populate('task', 'status isDeleted department')
       .sort({ createdAt: -1 })
       .lean();
@@ -472,6 +479,23 @@ router.delete('/:id', auth('admin', 'manager'), async (req, res) => {
     if (!record) return res.status(404).json({ status: 404, message: 'Not found' });
     await Task.findByIdAndUpdate(record.task, { status: 'cancelled' });
     res.json({ status: 200, message: 'Deleted' });
+  } catch (e) {
+    res.status(500).json({ status: 500, message: e.message });
+  }
+});
+
+router.patch('/:id', auth('admin', 'manager', 'sales', 'support', 'logistics'), async (req, res) => {
+  try {
+    const record = await ReadyToShipment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!record) return res.status(404).json({ status: 404, message: 'Not found' });
+    if (record.lead) {
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const leadId = record.lead._id || record.lead;
+      if (req.body.prescribedMedicines) {
+        await Lead.findByIdAndUpdate(leadId, { prescribedMedicines: req.body.prescribedMedicines }).catch(() => {});
+      }
+    }
+    res.json({ status: 200, data: record });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

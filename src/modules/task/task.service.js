@@ -38,9 +38,14 @@ const syncProfileToLead = async (task) => {
       age: task.age,
       weight: task.weight,
       height: task.height,
+      gender: task.gender,
+      occupation: task.occupation,
+      maritalStatus: task.maritalStatus,
       otherProblems: task.otherProblems,
       problemDuration: task.problemDuration,
-      department: task.department
+      department: task.department,
+      price: task.price,
+      revenue: task.price,
     };
     Object.keys(profileFields).forEach(key => profileFields[key] === undefined && delete profileFields[key]);
     await Lead.findByIdAndUpdate(leadId, { $set: profileFields }).catch(err => {
@@ -63,6 +68,9 @@ const handleVerificationSync = async (task, userId) => {
     age: task.age,
     weight: task.weight,
     height: task.height,
+    gender: task.gender,
+    occupation: task.occupation,
+    maritalStatus: task.maritalStatus,
     otherProblems: task.otherProblems,
     problemDuration: task.problemDuration,
     price: task.price,
@@ -278,7 +286,7 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
 
   const tasks = await Task.find({ _id: { $in: taskIds } })
     .populate('assignedTo', 'name email')
-    .populate('lead', 'name phone status cnp')
+    .populate('lead', 'name phone status cnp gender occupation maritalStatus age weight problemDuration prescribedMedicines')
     .sort({ createdAt: -1 });
 
   const cleanTasks = tasks.filter(t => !t.lead?.cnp && t.status !== 'cnp');
@@ -288,7 +296,7 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
 export const getTaskById = async (id, userRole, userId, userDepartments = []) => {
   const task = await Task.findOne({ _id: id, isDeleted: false })
     .populate('assignedTo', 'name email')
-    .populate('lead', 'name phone');
+    .populate('lead', 'name phone status cnp gender occupation maritalStatus age weight problemDuration prescribedMedicines');
   if (!task) throw new ApiError(httpStatus.NOT_FOUND, 'Task not found');
   if (userRole === 'sales') {
     if (String(task.assignedTo?._id) !== String(userId)) {
@@ -329,6 +337,9 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     age: task.age,
     weight: task.weight,
     height: task.height,
+    gender: task.gender,
+    occupation: task.occupation,
+    maritalStatus: task.maritalStatus,
     otherProblems: task.otherProblems,
     problemDuration: task.problemDuration,
     price: task.price,
@@ -343,7 +354,8 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     reminderAt: task.reminderAt,
     notes: task.notes,
   };
-  if (data.status === 'cnp') {
+  const effectiveStatus = data.status || task.status;
+  if (effectiveStatus === 'cnp') {
     await Cnp.findOneAndUpdate({ task: task._id }, { ...record, lastCnpAt: new Date(), $inc: { cnpCount: 1 }, $push: { cnpHistory: { clickedAt: new Date() } } }, { upsert: true, returnDocument: 'after' });
     await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
@@ -351,13 +363,13 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
       const leadId = task.lead._id || task.lead;
       await Lead.findByIdAndUpdate(leadId, { cnp: true }).catch(() => {});
     }
-  } else if (data.status === 'verification') {
+  } else if (effectiveStatus === 'verification') {
     await handleVerificationSync(task, userId);
     if (task.lead) {
       const leadId = task.lead._id || task.lead;
-      await Lead.findByIdAndUpdate(leadId, { status: 'verification' }).catch(() => {});
+      await Lead.findByIdAndUpdate(leadId, { status: 'verification', price: task.price, revenue: task.price }).catch(() => {});
     }
-  } else if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(data.status)) {
+  } else if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(effectiveStatus)) {
     await ReadyToShipment.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
     await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
@@ -370,7 +382,7 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
   }
-  
+
   await syncProfileToLead(task);
   return getTaskById(id, userRole, userId, userDepartments);
 };
@@ -425,7 +437,7 @@ export const getDailyTasks = async (filter, userId, userRole, userDepartments = 
   const dedupedIds = (await Task.aggregate(pipeline)).map(r => r._id);
 
   const tasks = await Task.find({ _id: { $in: dedupedIds } })
-    .populate('lead', 'name phone status cnp')
+    .populate('lead', 'name phone status cnp gender occupation maritalStatus age weight problemDuration prescribedMedicines')
     .populate('assignedTo', 'name email')
     .sort({ createdAt: -1 });
 

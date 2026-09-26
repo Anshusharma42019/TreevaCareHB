@@ -95,12 +95,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
       .populate('verifiedBy', 'name email')
       .populate({
         path: 'lead',
-        select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
+        select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source gender occupation maritalStatus age weight problemDuration prescribedMedicines price revenue',
         populate: { path: 'createdBy', select: 'name role' }
       })
       .populate({
         path: 'task',
-        select: 'department createdBy',
+        select: 'department createdBy price problem age weight height gender occupation maritalStatus otherProblems problemDuration houseNo cityVillage cityVillageType postOffice district landmark pincode state',
         populate: { path: 'createdBy', select: 'name role' }
       })
       .sort({ createdAt: -1 })
@@ -239,7 +239,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
   (async () => {
     try {
       const Task = (await import('../task/task.model.js')).default;
-      const verificationTasks = await Task.find({ status: 'verification', isDeleted: false }, '_id title assignedTo lead dueDate description cityVillageType cityVillage houseNo postOffice district landmark pincode state reminderAt notes problem age weight height otherProblems problemDuration price department');
+      const verificationTasks = await Task.find({ status: 'verification', isDeleted: false }, '_id title assignedTo lead dueDate description cityVillageType cityVillage houseNo postOffice district landmark pincode state reminderAt notes problem age weight height gender occupation maritalStatus otherProblems problemDuration price department');
       const existingTaskIds = await Verification.distinct('task');
       const existingSet = new Set(existingTaskIds.map(id => id.toString()));
       const newTasks = verificationTasks.filter(t => !existingSet.has(t._id.toString()));
@@ -255,6 +255,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
               landmark: task.landmark, pincode: task.pincode, state: task.state,
               reminderAt: task.reminderAt, notes: task.notes,
               problem: task.problem, age: task.age, weight: task.weight, height: task.height,
+              gender: task.gender, occupation: task.occupation, maritalStatus: task.maritalStatus,
               otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price,
               department: task.department,
             })),
@@ -354,7 +355,8 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
                 // NOTE: assignedTo is intentionally excluded here to preserve the original
                 // closer's name. Only metadata/content fields are synced.
                 title: task.title, lead: task.lead,
-                age: task.age, weight: task.weight, height: task.height, price: task.price,
+                age: task.age, weight: task.weight, height: task.height,
+                gender: task.gender, occupation: task.occupation, maritalStatus: task.maritalStatus, price: task.price,
                 problem: task.problem, otherProblems: task.otherProblems,
                 problemDuration: task.problemDuration, description: task.description,
                 cityVillageType: task.cityVillageType, cityVillage: task.cityVillage,
@@ -394,7 +396,7 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
 
     const verifiedRecords = await Verification.find({ status: 'verified' })
       .populate('assignedTo', 'name email')
-      .populate('lead', 'name phone status createdBy assignedTo pending_reorder_source');
+      .populate('lead', 'name phone status createdBy assignedTo pending_reorder_source gender occupation maritalStatus age weight problemDuration prescribedMedicines');
 
     let fixed = 0;
     for (const record of verifiedRecords) {
@@ -490,7 +492,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
       .populate('verifiedBy', 'name email')
       .populate({
         path: 'lead',
-        select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source',
+        select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source gender occupation maritalStatus',
         populate: { path: 'createdBy', select: 'name role' }
       })
       .sort({ onHoldUntil: -1 })
@@ -672,7 +674,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     )
       .populate('assignedTo', 'name email')
       .populate('verifiedBy', 'name email')
-      .populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source');
+      .populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source gender occupation maritalStatus age weight problemDuration prescribedMedicines');
     if (!record) return res.status(404).json({ message: 'Not found' });
 
     if (record.lead) {
@@ -691,9 +693,13 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
         age: record.age,
         weight: record.weight,
         height: record.height,
+        gender: record.gender,
+        occupation: record.occupation,
+        maritalStatus: record.maritalStatus,
         otherProblems: record.otherProblems,
         problemDuration: record.problemDuration,
-        department: record.department
+        department: record.department,
+        prescribedMedicines: record.prescribedMedicines,
       };
       Object.keys(profileFields).forEach(key => profileFields[key] === undefined && delete profileFields[key]);
       await Lead.findByIdAndUpdate(leadId, { $set: profileFields }).catch(() => {});
@@ -853,6 +859,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
               description: record.description,
               problem: record.problem,
               age: record.age, weight: record.weight, height: record.height,
+              gender: record.gender, occupation: record.occupation, maritalStatus: record.maritalStatus,
               otherProblems: record.otherProblems, problemDuration: record.problemDuration,
               price: record.price,
               cityVillageType: record.cityVillageType, cityVillage: record.cityVillage,

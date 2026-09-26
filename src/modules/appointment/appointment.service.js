@@ -86,6 +86,7 @@ export const getAppointments = async (query) => {
       .skip(skip)
       .limit(Number(limit))
       .populate('createdBy', 'name')
+      .populate('lead', 'name phone status gender occupation maritalStatus age weight problemDuration prescribedMedicines')
       .lean(),
     Appointment.countDocuments(filter),
   ]);
@@ -96,6 +97,7 @@ export const getAppointments = async (query) => {
 export const getAppointmentById = async (id) => {
   const appt = await Appointment.findOne({ _id: id, isDeleted: false })
     .populate('createdBy', 'name')
+    .populate('lead', 'name phone status gender occupation maritalStatus age weight problemDuration prescribedMedicines')
     .lean();
   if (!appt) throw new ApiError(httpStatus.NOT_FOUND, 'Appointment not found');
   return appt;
