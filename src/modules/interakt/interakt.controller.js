@@ -40,14 +40,16 @@ const handleWebhook = catchAsync(async (req, res) => {
     if (isMessage) {
       let phone, messageText, customerName, targetDepartment = null;
       
-      if (payload.type === 'message_received' && payload.data) {
-        phone = payload.data.customer?.phone_number || payload.data.customer?.phone;
-        customerName = payload.data.customer?.traits?.name || `WhatsApp Lead (${phone})`;
+      if (payload.data || payload.customer || payload.message || payload.entity) {
+        phone = payload.data?.customer?.phone_number || payload.data?.customer?.phone || payload.customer?.phone_number || payload.customer?.phone || payload.userPhoneNumber || payload.phone_number || payload.phone;
+        customerName = payload.data?.customer?.traits?.name || payload.data?.customer?.name || payload.customer?.name || `WhatsApp Lead (${phone || ''})`;
         
-        const msgObj = payload.data.message;
+        const msgObj = payload.data?.message || payload.message || payload.entity;
         let extractedText = "";
         
-        if (typeof msgObj?.message === 'string') {
+        if (typeof msgObj === 'string') {
+          extractedText = msgObj;
+        } else if (typeof msgObj?.message === 'string') {
           extractedText = msgObj.message;
         } else if (msgObj?.message?.text) {
           extractedText = msgObj.message.text;
@@ -91,7 +93,7 @@ const handleWebhook = catchAsync(async (req, res) => {
 
         messageText = extractedText ? (extractedText + referralText).trim() : (msgObj ? `[${msgObj.type || 'Media/File'} Received]` : "New message received");
 
-        let businessPhone = payload.data?.customer?.channel_phone_number || "";
+        let businessPhone = payload.data?.customer?.channel_phone_number || payload.channel_phone_number || "";
         
         const fallbackMale = "7309523829,917309523829,916376776399,6376776399";
         const maleNumbers = (process.env.INTERAKT_MALE_NUMBERS || fallbackMale).split(",");
@@ -107,11 +109,14 @@ const handleWebhook = catchAsync(async (req, res) => {
             targetDepartment = 'male';
         } else if (businessPhone && haircareNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
             targetDepartment = 'haircare';
+        } else {
+            // Default fallback for Interakt leads so they don't get stuck in unassigned department
+            targetDepartment = 'male';
         }
         
       } else {
-        phone = payload.userPhoneNumber;
-        customerName = `WhatsApp Lead (${phone})`;
+        phone = payload.userPhoneNumber || payload.phone;
+        customerName = `WhatsApp Lead (${phone || ''})`;
         messageText = payload.message?.text || payload.entity?.text || payload.entity?.suggestionResponse?.postBack?.data || "New message received";
       }
 

@@ -8,6 +8,7 @@ import routes from "./routes/index.js";
 import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
 import { shipmaxxWebhook, runCronSyncWebhook } from "./modules/shipmaxx/shipmaxx.controller.js";
 import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
+import interaktController from "./modules/interakt/interakt.controller.js";
 
 const app = express();
 
@@ -70,6 +71,14 @@ app.post("/api/v1/webhook/shipmaxx", shipmaxxWebhook);
 app.get("/cron/shipmaxx-sync", runCronSyncWebhook);
 app.get("/api/shipmaxx/cron/shipmaxx-sync", runCronSyncWebhook);
 app.get("/api/v1/shipmaxx/cron/shipmaxx-sync", runCronSyncWebhook);
+
+// Interakt webhook aliases (supports any URL variation entered in Interakt dashboard)
+app.post("/webhook/interakt", interaktController.handleWebhook);
+app.get("/webhook/interakt", (req, res) => res.status(200).send('OK'));
+app.post("/interakt/webhook", interaktController.handleWebhook);
+app.get("/interakt/webhook", (req, res) => res.status(200).send('OK'));
+app.post("/api/interakt/webhook", interaktController.handleWebhook);
+app.get("/api/interakt/webhook", (req, res) => res.status(200).send('OK'));
 
 // v1 api routes
 app.use(cacheInvalidatorMiddleware);
