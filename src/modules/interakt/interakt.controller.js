@@ -13,12 +13,21 @@ import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import { detectDepartmentFromText } from '../../utils/departmentKeywords.js';
 
 const processingWebhooks = new Set();
+const recentWebhookLogs = [];
 
 /**
  * Handle incoming webhooks from Interakt
  */
 const handleWebhook = catchAsync(async (req, res) => {
   const payload = req.body;
+
+  recentWebhookLogs.unshift({
+    timestamp: new Date().toISOString(),
+    ip: req.ip || req.headers['x-forwarded-for'],
+    headers: req.headers,
+    body: payload
+  });
+  if (recentWebhookLogs.length > 25) recentWebhookLogs.pop();
 
   console.log(`[Interakt Webhook] Received:`, JSON.stringify(payload, null, 2));
 
@@ -437,6 +446,9 @@ export default {
   latestLeads: catchAsync(async (req, res) => {
     const leads = await Lead.find({ source: 'social_media' }).sort({ createdAt: -1 }).limit(10).lean();
     res.status(200).json({ success: true, leads });
+  }),
+  getLogs: catchAsync(async (req, res) => {
+    res.status(200).json({ success: true, count: recentWebhookLogs.length, logs: recentWebhookLogs });
   }),
   getTemplates: catchAsync(async (req, res) => {
     const templates = await getApprovedTemplates();

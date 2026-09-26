@@ -9,6 +9,7 @@ const router = express.Router();
 // Route to handle webhooks sent from Interakt
 router.post('/webhook', interaktController.handleWebhook);
 router.get('/webhook', (req, res) => res.status(200).send('OK'));
+router.get('/webhook-logs', interaktController.getLogs);
 router.get('/debug-tasks', debugTasks);
 router.get('/latest-leads', interaktController.latestLeads);
 router.get('/templates', auth(), interaktController.getTemplates);
