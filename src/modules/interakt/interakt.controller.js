@@ -22,7 +22,7 @@ const handleWebhook = catchAsync(async (req, res) => {
 
   console.log(`[Interakt Webhook] Received:`, JSON.stringify(payload, null, 2));
 
-  if (!payload || (!payload.entityType && !payload.type)) {
+  if (!payload || typeof payload !== 'object') {
     return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'Invalid payload'));
   }
 
@@ -30,12 +30,17 @@ const handleWebhook = catchAsync(async (req, res) => {
     const isMessage = 
       payload.entityType === 'USER_MESSAGE' || 
       payload.type === 'message_received' ||
+      payload.event === 'message_received' ||
       payload.type === 'inbound_message' ||
       payload.type === 'user_message_received' ||
       payload.type === 'customer_created' ||
       payload.type === 'user_created' ||
       payload.type === 'message_created' ||
-      payload.data?.type === 'message';
+      payload.data?.type === 'message' ||
+      payload.data?.message != null ||
+      payload.message != null ||
+      payload.customer != null ||
+      payload.data?.customer != null;
     
     if (isMessage) {
       let phone, messageText, customerName, targetDepartment = null;
