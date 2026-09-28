@@ -2869,8 +2869,13 @@ export const ndrBulkAction = catchAsync(async (req, res) => {
 
 // ── NDR Notes (DB) ────────────────────────────────────────────────────────────
 export const getNdrNotes = catchAsync(async (req, res) => {
-  const { date, search } = req.query;
-  const match = { source: 'shipmaxx' };
+  const { date, search, all } = req.query;
+  let match = {};
+  if (all === 'true' || all === '1') {
+    match = {};
+  } else {
+    match = { $or: [{ source: 'shipmaxx' }, { source: { $exists: false } }] };
+  }
   if (date) {
     match.createdAt = {
       $gte: new Date(date + 'T00:00:00.000+05:30'),
@@ -2878,11 +2883,23 @@ export const getNdrNotes = catchAsync(async (req, res) => {
     };
   }
   if (search) {
-    match.$or = [
-      { name: { $regex: search, $options: 'i' } },
-      { phone_number: { $regex: search, $options: 'i' } },
-      { awb_number: { $regex: search, $options: 'i' } },
+    const sRegex = { $regex: search, $options: 'i' };
+    const sConds = [
+      { name: sRegex },
+      { phone_number: sRegex },
+      { awb_number: sRegex },
+      { reason: sRegex }
     ];
+    if (match.$or) {
+      const origOr = match.$or;
+      delete match.$or;
+      match.$and = [
+        { $or: origOr },
+        { $or: sConds }
+      ];
+    } else {
+      match.$or = sConds;
+    }
   }
   const notes = await NdrNote.find(match).sort({ createdAt: -1 }).populate('createdBy', 'name role').lean();
   res.json(new ApiResponse(200, notes, 'NDR notes fetched'));
