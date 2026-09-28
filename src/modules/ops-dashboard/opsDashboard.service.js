@@ -1096,7 +1096,7 @@ export async function submitRtoVerification({ order_id, platform, action }) {
     const order = await ShipmaxxOrder.findOneAndUpdate(
       { order_id },
       { $set: { rto_verification_action: action } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!order) throw new Error('Shipmaxx order not found');
     return order;
@@ -1104,7 +1104,7 @@ export async function submitRtoVerification({ order_id, platform, action }) {
     const order = await Order.findOneAndUpdate(
       { order_id },
       { $set: { rto_verification_action: action } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!order) throw new Error('Shiprocket order not found');
     return order;
@@ -1211,7 +1211,7 @@ export async function createInvoiceHistory(data, userId) {
   return await InvoiceHistory.findOneAndUpdate(
     { billNumber: data.billNumber },
     { ...data, generatedBy: userId },
-    { upsert: true, new: true, runValidators: true }
+    { upsert: true, returnDocument: 'after', runValidators: true }
   );
 }
 

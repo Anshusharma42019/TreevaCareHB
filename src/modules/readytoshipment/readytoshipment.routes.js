@@ -486,7 +486,7 @@ router.delete('/:id', auth('admin', 'manager'), async (req, res) => {
 
 router.patch('/:id', auth('admin', 'manager', 'sales', 'support', 'logistics'), async (req, res) => {
   try {
-    const record = await ReadyToShipment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const record = await ReadyToShipment.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after' });
     if (!record) return res.status(404).json({ status: 404, message: 'Not found' });
     if (record.lead) {
       const Lead = (await import('../lead/lead.model.js')).default;

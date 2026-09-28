@@ -56,12 +56,30 @@ router.post('/save', auth('admin', 'manager', 'sales', 'support', 'logistics', '
 
     let savedPrescription;
     if (existing) {
-      savedPrescription = await Prescription.findByIdAndUpdate(existing._id, payload, { new: true });
+      savedPrescription = await Prescription.findByIdAndUpdate(existing._id, payload, { returnDocument: 'after' });
     } else {
       savedPrescription = await Prescription.create(payload);
     }
 
     res.json({ status: 200, data: savedPrescription, message: 'Prescription saved successfully in dedicated database collection' });
+  } catch (e) {
+    res.status(500).json({ status: 500, message: e.message });
+  }
+});
+
+// DELETE /api/prescriptions/:id (Admin only permanent deletion)
+router.delete('/:id', auth('admin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
+    const filterConditions = [];
+    if (isMongoId) {
+      filterConditions.push({ _id: id }, { lead: id }, { appointment: id }, { task: id }, { verification: id }, { readyToShipment: id });
+    }
+    filterConditions.push({ targetId: String(id) });
+
+    const result = await Prescription.deleteMany({ $or: filterConditions });
+    res.json({ status: 200, message: 'Prescription permanently deleted from database', deletedCount: result.deletedCount });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

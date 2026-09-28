@@ -2442,7 +2442,7 @@ export const createManualFollowup = catchAsync(async (req, res) => {
 
 export const readReply = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { new: true });
+  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { returnDocument: 'after' });
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
   res.json(new ApiResponse(200, order, 'Reply marked as read'));
 });

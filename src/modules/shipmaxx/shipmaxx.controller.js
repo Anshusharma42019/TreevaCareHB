@@ -2617,7 +2617,7 @@ export const debugBackfillDelivered = catchAsync(async (req, res) => {
 
 export const readReply = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { new: true });
+  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { returnDocument: 'after' });
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
   res.json(new ApiResponse(200, order, 'Reply marked as read'));
 });
@@ -3020,11 +3020,23 @@ export const backfillDepartments = catchAsync(async (req, res) => {
     }
   }
 
-  if (srBulk.length > 0) {
-    await ShiprocketOrder.bulkWrite(srBulk);
-  }
-
   res.json(new ApiResponse(200, { smxUpdated, smxReset, srUpdated, srReset, smxTotalOps: smxBulk.length, srTotalOps: srBulk.length }, 'Department backfill completed instantly'));
+});
+
+export const deleteShipmaxxOrder = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
+  const query = isMongoId ? { $or: [{ _id: id }, { order_id: id }] } : { order_id: id };
+
+  await Order.deleteMany(query);
+  await ReadyToShipment.deleteMany(query);
+  await InTransitOrder.deleteMany(query);
+  await DeliveredOrder.deleteMany(query);
+  await RTOOrder.deleteMany(query);
+  await ShiprocketReturn.deleteMany(query);
+  await Followup.deleteMany(query);
+
+  res.json(new ApiResponse(200, null, 'Shipmaxx record permanently deleted from database'));
 });
 
 

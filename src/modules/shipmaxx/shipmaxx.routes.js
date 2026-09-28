@@ -417,4 +417,8 @@ router.post('/ndr/notes', auth(), c.createNdrNote);
 router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
 router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
 
+// Admin-only permanent order deletion
+router.delete('/orders/:id', auth('admin'), c.deleteShipmaxxOrder);
+router.delete('/:id', auth('admin'), c.deleteShipmaxxOrder);
+
 export default router;
