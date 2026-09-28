@@ -64,7 +64,7 @@ router.patch('/me/avatar', auth('admin', 'manager', 'sales', 'support', 'logisti
 
 router
   .route('/:userId')
-  .get(auth('admin', 'manager', 'sales', 'support', 'logistics'), validate(userValidation.getUser), userController.getUser)
+  .get(auth('admin', 'manager', 'sales', 'support', 'logistics', 'doctor', 'staff'), validate(userValidation.getUser), userController.getUser)
   .patch(auth('admin', 'manager'), validate(userValidation.updateUser), userController.updateUser)
   .delete(auth('admin', 'manager'), validate(userValidation.deleteUser), userController.deleteUser);
 

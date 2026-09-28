@@ -1033,14 +1033,37 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   const settings = getFollowupSettings();
   const total = Number(settings.total_followups) || DEFAULT_FOLLOWUP_TOTAL;
   const gap = Number(settings.followup_gap_days) || DEFAULT_FOLLOWUP_GAP_DAYS;
-  const count = await Followup.countDocuments({ order_id: id });
+
+  const mongoose = (await import('mongoose')).default;
+  const db = mongoose.connection.db;
+
+  const isObjId = mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === String(id);
+  const orderFilter = isObjId
+    ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { order_id: String(id) }] }
+    : { order_id: String(id) };
+
+  const updateFields = {
+    status: 'completed',
+    is_completed: true,
+    completed: true,
+    completed_at: new Date(),
+    completed_by: req.user?._id,
+    followup_done: true,
+  };
+
+  await db.collection('shipmaxxorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('shiprocketorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('orders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('readytoshipments').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+
+  const count = await Followup.countDocuments({ $or: [{ order_id: id }, orderFilter] });
   if (count === 0) {
-    const order = await Order.findById(id).select('delivered_at createdAt').lean();
-    await setAutoFollowUps(id, order?.delivered_at || order?.createdAt || new Date());
+    const order = await Order.findOne(orderFilter).select('delivered_at createdAt').lean();
+    await setAutoFollowUps(id, order?.delivered_at || order?.createdAt || new Date()).catch(() => {});
   }
-  const current = await Followup.findOne({ order_id: id, completed: false }).sort({ followup_number: 1 });
+  const current = await Followup.findOne({ $or: [{ order_id: id }, orderFilter], completed: false }).sort({ followup_number: 1 });
   if (!current) {
-    await Order.findByIdAndUpdate(id, { followup_done: true });
+    await Order.updateMany(orderFilter, { $set: { followup_done: true, status: 'completed', is_completed: true, completed: true } }).catch(() => {});
     return res.json(new ApiResponse(200, { completedCount: total, next_follow_up: null }, 'All follow-ups done'));
   }
   current.completed = true;

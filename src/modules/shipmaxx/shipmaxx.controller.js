@@ -2074,16 +2074,39 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   const total = DEFAULT_FOLLOWUP_TOTAL;
   const gap = DEFAULT_FOLLOWUP_GAP_DAYS;
 
-  const count = await Followup.countDocuments({ order_id: id });
+  const mongoose = (await import('mongoose')).default;
+  const db = mongoose.connection.db;
+
+  const isObjId = mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === String(id);
+  const orderFilter = isObjId
+    ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { order_id: String(id) }] }
+    : { order_id: String(id) };
+
+  const updateFields = {
+    status: 'completed',
+    is_completed: true,
+    completed: true,
+    completed_at: new Date(),
+    completed_by: req.user?._id,
+    followup_done: true,
+  };
+
+  await db.collection('shipmaxxorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('shiprocketorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('orders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+  await db.collection('readytoshipments').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
+
+  const count = await Followup.countDocuments({ $or: [{ order_id: id }, orderFilter] });
   if (count === 0) {
-    const order = await Order.findById(id).select('delivered_at createdAt platform').lean();
-    if (!order || order.platform !== 'shipmaxx') return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
-    await setAutoFollowUps(id, order.delivered_at || order.createdAt || new Date());
+    const order = await Order.findOne(orderFilter).select('delivered_at createdAt platform').lean();
+    if (order) {
+      await setAutoFollowUps(order._id || id, order.delivered_at || order.createdAt || new Date()).catch(() => {});
+    }
   }
 
-  const current = await Followup.findOne({ order_id: id, completed: false }).sort({ followup_number: 1 });
+  const current = await Followup.findOne({ $or: [{ order_id: id }, orderFilter], completed: false }).sort({ followup_number: 1 });
   if (!current) {
-    await Order.findByIdAndUpdate(id, { followup_done: true });
+    await Order.updateMany(orderFilter, { $set: { followup_done: true, status: 'completed', is_completed: true } }).catch(() => {});
     return res.json(new ApiResponse(200, { completedCount: total, next_follow_up: null }, 'All follow-ups done'));
   }
 
@@ -2094,11 +2117,13 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   current.completed_at = new Date();
 
   if (req.body?.note) { current.note = req.body.note; current.notes = req.body.note; }
-  if (current.followup_number >= total) await Order.findByIdAndUpdate(id, { followup_done: true });
+  if (current.followup_number >= total) {
+    await Order.updateMany(orderFilter, { $set: { followup_done: true, status: 'completed', is_completed: true } }).catch(() => {});
+  }
   await current.save();
 
   // Shift remaining followups
-  const remaining = await Followup.find({ order_id: id, completed: false }).sort({ followup_number: 1 });
+  const remaining = await Followup.find({ $or: [{ order_id: id }, orderFilter], completed: false }).sort({ followup_number: 1 });
   let nextDate = null;
   if (remaining.length > 0) {
     let base = new Date();
@@ -2110,7 +2135,7 @@ export const completeFollowUp = catchAsync(async (req, res) => {
     nextDate = remaining[0].scheduled_date;
   }
 
-  await Order.findByIdAndUpdate(id, { next_follow_up: nextDate });
+  await Order.updateMany(orderFilter, { $set: { next_follow_up: nextDate, status: 'completed', is_completed: true } }).catch(() => {});
   res.json(new ApiResponse(200, { completedCount: current.followup_number, next_follow_up: nextDate, total_followups: total, followup_gap_days: gap }, 'Follow-up completed'));
 });
 

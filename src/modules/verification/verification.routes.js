@@ -634,6 +634,36 @@ router.get('/by-task/:taskId', auth('admin', 'manager', 'sales', 'support'), dep
   }
 });
 
+router.get('/:id', auth('admin', 'manager', 'sales', 'support', 'logistics', 'doctor', 'staff'), departmentFilter, async (req, res) => {
+  try {
+    const record = await Verification.findById(req.params.id)
+      .populate('assignedTo', 'name email departments')
+      .populate('verifiedBy', 'name email')
+      .populate({
+        path: 'lead',
+        select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source gender occupation maritalStatus age weight problemDuration prescribedMedicines',
+        populate: [
+          { path: 'createdBy', select: 'name role' },
+          { path: 'assignedTo', select: 'name role' }
+        ]
+      })
+      .populate({
+        path: 'task',
+        select: 'department createdBy assignedTo price problem age weight height gender occupation maritalStatus otherProblems problemDuration houseNo cityVillage cityVillageType postOffice district landmark pincode state',
+        populate: [
+          { path: 'createdBy', select: 'name role' },
+          { path: 'assignedTo', select: 'name role' }
+        ]
+      })
+      .lean();
+
+    if (!record) return res.status(404).json({ status: 404, message: 'Verification record not found' });
+    res.json({ status: 200, data: record });
+  } catch (e) {
+    res.status(500).json({ status: 500, message: e.message });
+  }
+});
+
 router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
     const recordBefore = await Verification.findById(req.params.id);
