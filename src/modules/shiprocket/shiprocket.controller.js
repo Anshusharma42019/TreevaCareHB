@@ -2046,14 +2046,53 @@ export const ndrAction = catchAsync(async (req, res) => { res.json(new ApiRespon
 import { NdrNote } from './models/ndrNote.model.js';
 
 export const getNdrNotes = catchAsync(async (req, res) => {
-  const { date, search } = req.query;
+  const { date, startDate, endDate, range, month, year, search } = req.query;
   const match = {};
   if (date) {
     match.createdAt = {
       $gte: new Date(date + 'T00:00:00.000+05:30'),
       $lte: new Date(date + 'T23:59:59.999+05:30'),
     };
+  } else if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate + 'T00:00:00.000+05:30');
+    if (endDate) match.createdAt.$lte = new Date(endDate + 'T23:59:59.999+05:30');
+  } else if ((month && month !== 'all') || (year && year !== 'all')) {
+    const y = year && year !== 'all' ? Number(year) : new Date().getFullYear();
+    if (month && month !== 'all') {
+      const m = Number(month);
+      const start = new Date(y, m - 1, 1);
+      const end = new Date(y, m, 0, 23, 59, 59, 999);
+      match.createdAt = { $gte: start, $lte: end };
+    } else {
+      const start = new Date(y, 0, 1);
+      const end = new Date(y, 11, 31, 23, 59, 59, 999);
+      match.createdAt = { $gte: start, $lte: end };
+    }
+  } else if (range && range !== 'all') {
+    const now = new Date();
+    if (range === 'today') {
+      const todayStr = now.toISOString().split('T')[0];
+      match.createdAt = {
+        $gte: new Date(todayStr + 'T00:00:00.000+05:30'),
+        $lte: new Date(todayStr + 'T23:59:59.999+05:30'),
+      };
+    } else if (range === 'yesterday') {
+      const yest = new Date(now.getTime() - 86400000);
+      const yestStr = yest.toISOString().split('T')[0];
+      match.createdAt = {
+        $gte: new Date(yestStr + 'T00:00:00.000+05:30'),
+        $lte: new Date(yestStr + 'T23:59:59.999+05:30'),
+      };
+    } else if (range === 'monthly') {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      match.createdAt = { $gte: startOfMonth };
+    } else if (range === 'yearly') {
+      const startOfYear = new Date(now.getFullYear(), 0, 1);
+      match.createdAt = { $gte: startOfYear };
+    }
   }
+
   if (search) {
     match.$or = [
       { name: { $regex: search, $options: 'i' } },
@@ -2066,10 +2105,11 @@ export const getNdrNotes = catchAsync(async (req, res) => {
 });
 
 export const createNdrNote = catchAsync(async (req, res) => {
-  const { name, phone_number, reason, awb_number } = req.body;
+  const { name, phone_number, reason, awb_number, price } = req.body;
   if (!name || !phone_number || !reason || !awb_number)
     return res.status(400).json(new ApiResponse(400, null, 'name, phone_number, reason, awb_number required'));
-  const note = await NdrNote.create({ name, phone_number, reason, awb_number, createdBy: req.user._id });
+  const note = await NdrNote.create({ name, phone_number, reason, awb_number, price: price !== undefined && price !== null && price !== '' ? Number(price) : null, createdBy: req.user._id });
+  await note.populate('createdBy', 'name role');
   res.json(new ApiResponse(200, note, 'NDR note created'));
 });
 

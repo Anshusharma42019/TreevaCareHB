@@ -5,6 +5,7 @@ const ndrNoteSchema = new mongoose.Schema({
   phone_number: { type: String, required: true },
   reason: { type: String, required: true },
   awb_number: { type: String, required: true },
+  price: { type: Number, default: null },
   source: { type: String, enum: ['shiprocket', 'shipmaxx'], default: 'shiprocket' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

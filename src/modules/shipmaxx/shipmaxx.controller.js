@@ -1936,17 +1936,18 @@ async function getKitNumbersMap(ordersArray, OrderModel) {
 }
 
 const detectOrderDepartment = (order) => {
-  if (order.department && ['male', 'ortho', 'skin'].includes(order.department)) {
+  if (order.department && ['male', 'ortho', 'skin', 'migraine', 'piles'].includes(order.department)) {
     return order.department;
   }
-  if (order.lead_id?.department && ['male', 'ortho', 'skin'].includes(order.lead_id.department)) {
+  if (order.lead_id?.department && ['male', 'ortho', 'skin', 'migraine', 'piles'].includes(order.lead_id.department)) {
     return order.lead_id.department;
   }
   const prodStr = (order.order_items || []).map(p => (p.name || '').toLowerCase()).join(' ');
   const probStr = (order.verification_problem || order.problem || order.lead_id?.problem || '').toLowerCase();
   const text = `${prodStr} ${probStr}`;
 
-  if (/migraine|piles/i.test(text)) return 'other';
+  if (/migraine/i.test(text)) return 'migraine';
+  if (/piles/i.test(text)) return 'piles';
 
   const maleRegex = /\b(male|men|man|sexual|erectile|testosterone|prostate|semen|penis|ed|nightfall|sperm|discharge)\b/i;
   const orthoRegex = /\b(ortho|joint|knee|bone|fracture|arthritis|spine|back pain|shoulder|ligament|gout)\b/i;
@@ -1962,36 +1963,52 @@ const detectOrderDepartment = (order) => {
 // ── Follow-ups ────────────────────────────────────────────────────────────────
 export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const { department } = req.query;
-  const ALLOWED_DEPTS = ['male', 'ortho', 'skin'];
+  const ALLOWED_DEPTS = ['male', 'ortho', 'skin', 'migraine', 'piles'];
+
+  // Auto-heal any orders where followup_done: true was set prematurely before completing all 5 followups
+  try {
+    const mongoose = (await import('mongoose')).default;
+    const incompleteFollowupOrderIds = await Followup.distinct('order_id', { completed: false });
+    if (incompleteFollowupOrderIds.length > 0) {
+      const stringIds = incompleteFollowupOrderIds.map(id => String(id));
+      const objIds = incompleteFollowupOrderIds.map(id => {
+        try { return new mongoose.Types.ObjectId(id); } catch { return null; }
+      }).filter(Boolean);
+
+      await Order.updateMany(
+        { platform: 'shipmaxx', followup_done: true, $or: [{ _id: { $in: objIds } }, { order_id: { $in: stringIds } }] },
+        { $set: { followup_done: false, status: 'DELIVERED', is_completed: false } }
+      ).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[ShipMaxx Auto-Heal Error]', err.message);
+  }
 
   const query = {
     platform: 'shipmaxx',
-    status: /^(delivered|del)$/i,
+    status: /^delivered$/i,
     followup_done: { $ne: true },
-    sent_to_verification: { $ne: true },
-    'order_items.name': { $not: /migraine|piles/i }
+    sent_to_verification: { $ne: true }
   };
 
   if (department && department !== 'all') {
     query.$or = [{ department }, { department: null }, { department: { $exists: false } }];
-  } else {
-    query.$or = [{ department: { $in: ALLOWED_DEPTS } }, { department: null }, { department: { $exists: false } }];
   }
 
   let delivered = await Order.find(query)
     .select('-raw_response')
-    .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note department', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
+    .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note department age weight gender maritalStatus occupation problemDuration', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
     .lean();
 
-  // Filter & ensure department is strictly male/ortho/skin or requested department
+  // Ensure department is attached to each order object
   delivered = delivered.filter(o => {
     const dept = detectOrderDepartment(o);
     o.department = dept;
     if (department && department !== 'all') {
       return dept === department;
     }
-    return ALLOWED_DEPTS.includes(dept);
+    return true;
   });
 
   // Ensure effective delivery date is set on each object
@@ -2024,14 +2041,14 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     fuMap[key].push(fu);
   }
 
-  // Find leads for unlinked orders by phone to get their verification problems
+  // Find leads for unlinked orders by phone to get their verification problems & vitals
   const unlinkedPhones = delivered
     .filter(o => !o.lead_id)
     .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
     .filter(p => p.length >= 10);
 
   const unlinkedLeads = unlinkedPhones.length > 0
-    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem').lean()
+    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem age weight gender maritalStatus occupation problemDuration').lean()
     : [];
 
   const unlinkedLeadMap = {};
@@ -2050,20 +2067,70 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
 
   const kitMap = await getKitNumbersMap(delivered, Order);
 
+  // Fetch Doctor Prescriptions for all orders by targetId, leadId, or billing_phone
+  let rxMap = {};
+  try {
+    const mongoose = (await import('mongoose')).default;
+    const Prescription = mongoose.models.Prescription || (await import('../prescription/prescription.model.js')).default;
+    const allPhones = delivered.map(o => String(o.billing_phone || '').replace(/\D/g, '').slice(-10)).filter(Boolean);
+
+    const prescriptions = await Prescription.find({
+      $or: [
+        { targetId: { $in: delivered.map(o => String(o._id)) } },
+        { lead: { $in: allLeadIds } },
+        { phone: { $in: allPhones } }
+      ]
+    }).sort({ updatedAt: -1 }).lean();
+
+    for (const rx of prescriptions) {
+      if (rx.targetId && !rxMap[rx.targetId]) rxMap[rx.targetId] = rx;
+      if (rx.lead && !rxMap[String(rx.lead)]) rxMap[String(rx.lead)] = rx;
+      if (rx.phone) {
+        const cleanP = String(rx.phone).replace(/\D/g, '').slice(-10);
+        if (cleanP && !rxMap[cleanP]) rxMap[cleanP] = rx;
+      }
+    }
+  } catch (err) {
+    console.error('[ShipMaxx Fetch Prescriptions Error]', err.message);
+  }
+
   const enriched = delivered.map(o => {
     let lId = o.lead_id?._id;
+    let matchedLead = o.lead_id;
     if (!lId) {
       const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
-      const matchedLead = unlinkedLeadMap[cleanPhone];
+      matchedLead = unlinkedLeadMap[cleanPhone];
       if (matchedLead) lId = matchedLead._id;
     }
     const verif = lId ? verifMap[String(lId)] : null;
+    const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '').slice(-10);
+    const rxDoc = rxMap[String(o._id)] || (lId ? rxMap[String(lId)] : null) || rxMap[cleanPhone] || null;
+
+    const age = rxDoc?.age || verif?.age || matchedLead?.age || o.age || '';
+    const weight = rxDoc?.weight || verif?.weight || matchedLead?.weight || o.weight || '';
+    const gender = rxDoc?.gender || verif?.gender || matchedLead?.gender || o.gender || 'Male';
+    const maritalStatus = rxDoc?.maritalStatus || verif?.maritalStatus || matchedLead?.maritalStatus || o.maritalStatus || '';
+    const occupation = rxDoc?.occupation || verif?.occupation || matchedLead?.occupation || o.occupation || '';
+    const problemDuration = rxDoc?.problemDuration || verif?.problemDuration || matchedLead?.problemDuration || o.problemDuration || '';
+
     return {
       ...o,
       followups: fuMap[String(o._id)] || [],
       verification_problem: verif?.problem || '',
       verification_notes: (verif?.notes || []).map(n => n.text).join('\n') || '',
-      kit_number: kitMap[String(o._id)] || 1
+      kit_number: kitMap[String(o._id)] || 1,
+      doctor_prescription: rxDoc || null,
+      prescribed_medicines: rxDoc?.prescribedMedicines || [],
+      doctor_name: rxDoc?.doctorName || '',
+      age,
+      weight,
+      gender,
+      maritalStatus,
+      occupation,
+      problemDuration,
+      since: problemDuration,
+      profession: occupation,
+      marriedStatus: maritalStatus,
     };
   });
   res.json(new ApiResponse(200, enriched, 'Orders with follow-ups fetched'));
@@ -2081,20 +2148,6 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   const orderFilter = isObjId
     ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { order_id: String(id) }] }
     : { order_id: String(id) };
-
-  const updateFields = {
-    status: 'completed',
-    is_completed: true,
-    completed: true,
-    completed_at: new Date(),
-    completed_by: req.user?._id,
-    followup_done: true,
-  };
-
-  await db.collection('shipmaxxorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
-  await db.collection('shiprocketorders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
-  await db.collection('orders').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
-  await db.collection('readytoshipments').updateMany(orderFilter, { $set: updateFields }).catch(() => {});
 
   const count = await Followup.countDocuments({ $or: [{ order_id: id }, orderFilter] });
   if (count === 0) {
@@ -2135,19 +2188,18 @@ export const completeFollowUp = catchAsync(async (req, res) => {
     nextDate = remaining[0].scheduled_date;
   }
 
-  await Order.updateMany(orderFilter, { $set: { next_follow_up: nextDate, status: 'completed', is_completed: true } }).catch(() => {});
+  await Order.updateMany(orderFilter, { $set: { next_follow_up: nextDate } }).catch(() => {});
   res.json(new ApiResponse(200, { completedCount: current.followup_number, next_follow_up: nextDate, total_followups: total, followup_gap_days: gap }, 'Follow-up completed'));
 });
 
 export const getCompletedFollowUps = catchAsync(async (req, res) => {
   const { search, page = 1, per_page = 20, department } = req.query;
-  const ALLOWED_DEPTS = ['male', 'ortho', 'skin'];
+  const ALLOWED_DEPTS = ['male', 'ortho', 'skin', 'migraine', 'piles'];
 
   const conditions = [
     { platform: 'shipmaxx' },
     { status: /^delivered$/i },
-    { followup_done: true },
-    { 'order_items.name': { $not: /migraine|piles/i } }
+    { followup_done: true }
   ];
 
   if (department && department !== 'all') {
@@ -2284,7 +2336,7 @@ export const getOrderActivity = catchAsync(async (req, res) => {
     .populate('comments.createdBy', 'name role').lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
   const activity = (order.comments || [])
-    .filter(c => !c.text?.startsWith('[WhatsApp Reply]'))
+    .filter(c => !c.text?.startsWith('[WhatsApp Reply]') && c.type !== 'general')
     .map(c => ({
       _id: c._id,
       type: c.type || 'general',
@@ -2869,7 +2921,7 @@ export const ndrBulkAction = catchAsync(async (req, res) => {
 
 // ── NDR Notes (DB) ────────────────────────────────────────────────────────────
 export const getNdrNotes = catchAsync(async (req, res) => {
-  const { date, search, all } = req.query;
+  const { date, startDate, endDate, range, month, year, search, all } = req.query;
   let match = {};
   if (all === 'true' || all === '1') {
     match = {};
@@ -2881,7 +2933,46 @@ export const getNdrNotes = catchAsync(async (req, res) => {
       $gte: new Date(date + 'T00:00:00.000+05:30'),
       $lte: new Date(date + 'T23:59:59.999+05:30'),
     };
+  } else if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = new Date(startDate + 'T00:00:00.000+05:30');
+    if (endDate) match.createdAt.$lte = new Date(endDate + 'T23:59:59.999+05:30');
+  } else if ((month && month !== 'all') || (year && year !== 'all')) {
+    const y = year && year !== 'all' ? Number(year) : new Date().getFullYear();
+    if (month && month !== 'all') {
+      const m = Number(month);
+      const start = new Date(y, m - 1, 1);
+      const end = new Date(y, m, 0, 23, 59, 59, 999);
+      match.createdAt = { $gte: start, $lte: end };
+    } else {
+      const start = new Date(y, 0, 1);
+      const end = new Date(y, 11, 31, 23, 59, 59, 999);
+      match.createdAt = { $gte: start, $lte: end };
+    }
+  } else if (range && range !== 'all') {
+    const now = new Date();
+    if (range === 'today') {
+      const todayStr = now.toISOString().split('T')[0];
+      match.createdAt = {
+        $gte: new Date(todayStr + 'T00:00:00.000+05:30'),
+        $lte: new Date(todayStr + 'T23:59:59.999+05:30'),
+      };
+    } else if (range === 'yesterday') {
+      const yest = new Date(now.getTime() - 86400000);
+      const yestStr = yest.toISOString().split('T')[0];
+      match.createdAt = {
+        $gte: new Date(yestStr + 'T00:00:00.000+05:30'),
+        $lte: new Date(yestStr + 'T23:59:59.999+05:30'),
+      };
+    } else if (range === 'monthly') {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      match.createdAt = { $gte: startOfMonth };
+    } else if (range === 'yearly') {
+      const startOfYear = new Date(now.getFullYear(), 0, 1);
+      match.createdAt = { $gte: startOfYear };
+    }
   }
+
   if (search) {
     const sRegex = { $regex: search, $options: 'i' };
     const sConds = [
@@ -2906,10 +2997,11 @@ export const getNdrNotes = catchAsync(async (req, res) => {
 });
 
 export const createNdrNote = catchAsync(async (req, res) => {
-  const { name, phone_number, reason, awb_number } = req.body;
+  const { name, phone_number, reason, awb_number, price } = req.body;
   if (!name || !phone_number || !reason || !awb_number)
     return res.status(400).json(new ApiResponse(400, null, 'name, phone_number, reason, awb_number required'));
-  const note = await NdrNote.create({ name, phone_number, reason, awb_number, source: 'shipmaxx', createdBy: req.user._id });
+  const note = await NdrNote.create({ name, phone_number, reason, awb_number, price: price !== undefined && price !== null && price !== '' ? Number(price) : null, source: 'shipmaxx', createdBy: req.user._id });
+  await note.populate('createdBy', 'name role');
   res.json(new ApiResponse(200, note, 'NDR note created'));
 });
 
@@ -3055,6 +3147,45 @@ export const deleteShipmaxxOrder = catchAsync(async (req, res) => {
 
   res.json(new ApiResponse(200, null, 'Shipmaxx record permanently deleted from database'));
 });
+
+export const autoDistributeFollowups = catchAsync(async (req, res) => {
+  const { department } = req.body || {};
+  const User = (await import('../user/user.model.js')).default;
+  const staffUsers = await User.find({
+    role: { $in: ['staff', 'sales', 'support', 'telecaller', 'admin', 'manager'] },
+    is_active: { $ne: false }
+  }).select('_id name role').lean();
+
+  if (!staffUsers.length) {
+    return res.status(400).json(new ApiResponse(400, null, 'No active staff users available for distribution'));
+  }
+
+  const query = {
+    platform: 'shipmaxx',
+    status: /^delivered$/i,
+    followup_done: { $ne: true },
+    sent_to_verification: { $ne: true }
+  };
+  if (department) query.department = department;
+
+  const orders = await Order.find(query).select('_id lead_id created_by').lean();
+
+  let count = 0;
+  for (let i = 0; i < orders.length; i++) {
+    const assignedStaff = staffUsers[i % staffUsers.length];
+    if (orders[i].lead_id) {
+      const Lead = (await import('../lead/lead.model.js')).Lead;
+      await Lead.updateOne({ _id: orders[i].lead_id }, { $set: { assignedTo: assignedStaff._id } });
+      count++;
+    } else {
+      await Order.updateOne({ _id: orders[i]._id }, { $set: { created_by: assignedStaff._id } });
+      count++;
+    }
+  }
+
+  res.json(new ApiResponse(200, { totalDistributed: count, staffCount: staffUsers.length }, `Successfully distributed ${count} follow-ups among ${staffUsers.length} staff members`));
+});
+
 
 
 

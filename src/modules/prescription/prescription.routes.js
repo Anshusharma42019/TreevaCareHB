@@ -7,13 +7,17 @@ const router = express.Router();
 // GET /api/prescriptions/get-by-target?targetId=...&leadId=...&taskId=...
 router.get('/get-by-target', auth('admin', 'manager', 'sales', 'support', 'logistics', 'doctor', 'staff'), async (req, res) => {
   try {
-    const { targetId, leadId, taskId, appointmentId } = req.query;
+    const { targetId, leadId, taskId, appointmentId, phone } = req.query;
     const matchCriteria = [];
     if (targetId) matchCriteria.push({ targetId: String(targetId) });
     if (leadId) matchCriteria.push({ lead: leadId });
     if (taskId) matchCriteria.push({ task: taskId });
     if (appointmentId) matchCriteria.push({ appointment: appointmentId });
     if (targetId && targetId.length === 24) matchCriteria.push({ _id: targetId });
+    if (phone) {
+      const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+      if (cleanPhone) matchCriteria.push({ phone: new RegExp(cleanPhone, 'i') });
+    }
 
     if (matchCriteria.length === 0) {
       return res.status(400).json({ status: 400, message: 'Missing targetId or leadId parameter' });

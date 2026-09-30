@@ -368,6 +368,7 @@ router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
 router.post('/orders/backfill-departments', auth(), c.backfillDepartments);
+router.post('/orders/auto-distribute', auth(), c.autoDistributeFollowups);
 
 
 
@@ -418,7 +419,7 @@ router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
 router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
 
 // Admin-only permanent order deletion
-router.delete('/orders/:id', auth('admin'), c.deleteShipmaxxOrder);
-router.delete('/:id', auth('admin'), c.deleteShipmaxxOrder);
+router.delete('/orders/:id', auth(), c.deleteShipmaxxOrder);
+router.delete('/:id', auth(), c.deleteShipmaxxOrder);
 
 export default router;
