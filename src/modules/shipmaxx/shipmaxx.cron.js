@@ -173,6 +173,7 @@ export const runCronSync = async () => {
           if (!o.order_id) continue;
           const query = { platform: 'shipmaxx', order_id: String(o.order_id) };
           const existing = await Order.findOne(query).select('status lead_id billing_customer_name billing_phone billing_address billing_pincode sub_total courier_name awb_code order_items createdAt').lean();
+          if (!existing && !o.awb) continue;
           
           if (existing) {
             existingCountInPage++;
@@ -194,8 +195,9 @@ export const runCronSync = async () => {
           if (!existing && o.created_at) ud.createdAt = new Date(o.created_at);
           if (o.awb && (!existing || !existing.awb_code)) ud.awb_code = String(o.awb);
           
-          if (o.status) {
-            const newStatus = normalizeShipmaxxStatus(o.status);
+          const rawStatus = o.current_status || o.order_status || o.status;
+          if (rawStatus) {
+            const newStatus = normalizeShipmaxxStatus(rawStatus);
             const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
             const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
             let shouldUpdateStatus = true;

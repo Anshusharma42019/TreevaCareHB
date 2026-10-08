@@ -1428,6 +1428,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
             if (!o.order_id) continue;
             const query = { platform: 'shipmaxx', order_id: String(o.order_id) };
             const existing = await Order.findOne(query).select('status lead_id billing_customer_name billing_phone billing_address billing_pincode sub_total courier_name awb_code order_items createdAt').lean();
+            if (!existing && !o.awb) continue;
 
             const cCust = o.customer || o.billing_address || {};
             const ud = { platform: 'shipmaxx', order_id: String(o.order_id) };
@@ -1443,8 +1444,9 @@ export const runSyncInBackground = async (mode = 'quick') => {
             if (!existing && o.created_at) ud.createdAt = new Date(o.created_at);
             if (o.awb && (!existing || !existing.awb_code)) ud.awb_code = String(o.awb);
 
-            if (o.status) {
-              const newStatus = normalizeShipmaxxStatus(o.status);
+            const rawStatus = o.current_status || o.order_status || o.status;
+            if (rawStatus) {
+              const newStatus = normalizeShipmaxxStatus(rawStatus);
               const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
               const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
               let shouldUpdateStatus = true;
@@ -1977,7 +1979,7 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
 
       await Order.updateMany(
         { platform: 'shipmaxx', followup_done: true, $or: [{ _id: { $in: objIds } }, { order_id: { $in: stringIds } }] },
-        { $set: { followup_done: false, status: 'DELIVERED', is_completed: false } }
+        { $set: { followup_done: false, is_completed: false } }
       ).catch(() => {});
     }
   } catch (err) {
@@ -2151,8 +2153,8 @@ export const completeFollowUp = catchAsync(async (req, res) => {
 
   const count = await Followup.countDocuments({ $or: [{ order_id: id }, orderFilter] });
   if (count === 0) {
-    const order = await Order.findOne(orderFilter).select('delivered_at createdAt platform').lean();
-    if (order) {
+    const order = await Order.findOne(orderFilter).select('status delivered_at createdAt platform').lean();
+    if (order && /^delivered$/i.test(order.status)) {
       await setAutoFollowUps(order._id || id, order.delivered_at || order.createdAt || new Date()).catch(() => {});
     }
   }
