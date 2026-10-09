@@ -1,6 +1,5 @@
 import Lead from '../lead/lead.model.js';
 import Task from '../task/task.model.js';
-import { Order } from '../shiprocket/models/order.model.js';
 import Verification from '../verification/verification.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import StaffTarget from './staffTarget.model.js';
@@ -70,7 +69,6 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     Verification.countDocuments({ ...filter, ...dateFilter }),
   ]);
 
-  const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
   
   const userLeads = await Lead.find({ assignedTo: uid }).select('_id').lean();
@@ -81,10 +79,7 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     ...(isAllTime ? {} : { $or: [{ delivered_at: { $gte: start, $lte: end } }, { updatedAt: { $gte: start, $lte: end } }] })
   };
 
-  const [ordersSR, ordersSM] = await Promise.all([
-    Order.find(deliveredQuery).select('source_order_id lead_id task_created_by verified_by created_by delivered_at updatedAt').lean(),
-    ShipmaxxOrder.find(deliveredQuery).select('source_order_id lead_id task_created_by verified_by created_by delivered_at updatedAt').lean()
-  ]);
+  const ordersSM = await ShipmaxxOrder.find(deliveredQuery).select('source_order_id lead_id task_created_by verified_by created_by delivered_at updatedAt').lean();
 
   let newDeliveredCount = 0, salesOldDeliveredCount = 0, supportOldDeliveredCount = 0;
   const leadIdSet = new Set(leadIds.map(String));
@@ -110,7 +105,6 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     }
   };
 
-  ordersSR.forEach(processUserOrder);
   ordersSM.forEach(processUserOrder);
 
   return {
@@ -401,7 +395,6 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const StaffTarget = (await import('./staffTarget.model.js')).default;
   const Cnp = (await import('../cnp/cnp.model.js')).default;
   const CallAgain = (await import('../callagain/callagain.model.js')).default;
-  const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
   const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
 
@@ -436,7 +429,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   // 2. Fetch Bulk Data in parallel
   const [
     allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
-    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM, allCommissions
+    allCnps, allCallAgains, allLeadsData, allOrdersSM, allCommissions
   ] = await Promise.all([
     Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
@@ -456,12 +449,6 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     Cnp.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo notes updatedAt').lean(),
     CallAgain.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('lead assignedTo status notes updatedAt').lean(),
     Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }, { 'follow_ups.date': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
-    Order.find({ 
-      status: { $not: /^(new|pending|cancelled)$/i },
-      ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
-    }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
-      .populate('lead_id', 'assignedTo status')
-      .lean(),
     ShipmaxxOrder.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
@@ -648,10 +635,9 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }
   };
 
-  for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
 
-  const synchronizedDeliveries = await getSynchronizedDeliveredOrders(isAllTime ? null : startOfDay, isAllTime ? null : endOfDay, Order, ShipmaxxOrder, true);
+  const synchronizedDeliveries = await getSynchronizedDeliveredOrders(isAllTime ? null : startOfDay, isAllTime ? null : endOfDay, ShipmaxxOrder, ShipmaxxOrder, true);
   
   // RTO lookback: 45 days (1 month 15 days) from the end of the period
   const rtoLookbackStart = isAllTime ? null : new Date(endOfDay.getTime() - 45 * 24 * 60 * 60 * 1000);
@@ -659,18 +645,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     createdAt: { $gte: rtoLookbackStart, $lte: endOfDay }
   };
 
-  const [rtoOrdersSM, rtoOrdersSR] = await Promise.all([
-    ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
-      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
-      .populate('lead_id', 'assignedTo')
-      .lean(),
-    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
-      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
-      .populate('lead_id', 'assignedTo')
-      .lean()
-  ]);
+  const rtoOrdersSM = await ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+    .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
+    .populate('lead_id', 'assignedTo')
+    .lean();
 
-  const allRtos = [...rtoOrdersSR, ...rtoOrdersSM];
+  const allRtos = rtoOrdersSM;
   for (const o of allRtos) {
     const isOldRto = Boolean(o.source_order_id);
     const lUid = o.lead_id ? String(o.lead_id.assignedTo || '') : null;
@@ -1298,15 +1278,15 @@ export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, Order
     { path: 'verified_by', select: 'name role' }
   ];
 
+  const TargetModel = ShipmaxxOrderModel || OrderModel;
+
   if (!monthStart || !monthEnd) {
-    let q1SR = OrderModel.find({ status: deliveredStatus }).select(selectFields);
-    let q1SM = ShipmaxxOrderModel.find({ status: deliveredStatus }).select(selectFields);
+    let q1SM = TargetModel.find({ status: deliveredStatus }).select(selectFields);
     if (populateDetails) {
-      q1SR = q1SR.populate(popList);
       q1SM = q1SM.populate(popList);
     }
-    const [sr, sm] = await Promise.all([q1SR.lean(), q1SM.lean()]);
-    return dedupOrders([...sr, ...sm]);
+    const sm = await q1SM.lean();
+    return dedupOrders(sm);
   }
 
   // Cohort: orders CREATED this period that are delivered
@@ -1341,26 +1321,23 @@ export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, Order
     ]
   };
 
-  let q1SR = OrderModel.find(cohortQuery).select(selectFields);
-  let q2SR = OrderModel.find(backlogQuery).select(selectFields);
-  let q1SM = ShipmaxxOrderModel.find(cohortQuery).select(selectFields);
-  let q2SM = ShipmaxxOrderModel.find(backlogQuery).select(selectFields);
+  let q1SM = TargetModel.find(cohortQuery).select(selectFields);
+  let q2SM = TargetModel.find(backlogQuery).select(selectFields);
 
   if (populateDetails) {
-    q1SR = q1SR.populate(popList);
-    q2SR = q2SR.populate(popList);
     q1SM = q1SM.populate(popList);
     q2SM = q2SM.populate(popList);
   }
 
-  const [cohortSR, backlogSR, cohortSM, backlogSM] = await Promise.all([
-    q1SR.lean(), q2SR.lean(), q1SM.lean(), q2SM.lean()
+  const [cohortSM, backlogSM] = await Promise.all([
+    q1SM.lean(), q2SM.lean()
   ]);
 
-  return dedupOrders([...cohortSR, ...backlogSR, ...cohortSM, ...backlogSM]);
+  return dedupOrders([...cohortSM, ...backlogSM]);
 }
 
 export async function getPhoneToSalesAgentMap(OrderModel, ShipmaxxOrderModel, LeadModel, userOrStatsMap, targetOrders = null) {
+  const TargetModel = ShipmaxxOrderModel || OrderModel;
   let allHistory;
   if (targetOrders && Array.isArray(targetOrders) && targetOrders.length <= 500) {
     if (targetOrders.length === 0) return { phoneToSales: {}, leadMap: {} };
@@ -1372,14 +1349,10 @@ export async function getPhoneToSalesAgentMap(OrderModel, ShipmaxxOrderModel, Le
       const phoneRegexes = uniquePhones.map(p => new RegExp(p + '$'));
       const selectFields = '_id lead_id task_created_by created_by verified_by source_order_id billing_phone status createdAt';
       const statusList = ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'];
-      const [sr, sm] = await Promise.all([
-        OrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean(),
-        ShipmaxxOrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean()
-      ]);
-      allHistory = [...sr, ...sm];
+      allHistory = await TargetModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean();
     }
   } else {
-    allHistory = await getSynchronizedDeliveredOrders(null, null, OrderModel, ShipmaxxOrderModel, false);
+    allHistory = await getSynchronizedDeliveredOrders(null, null, TargetModel, TargetModel, false);
   }
 
   const allLeadIds = [...new Set(allHistory.map(o => o.lead_id).filter(Boolean).map(String))];
@@ -1421,7 +1394,6 @@ export const getAllStaffCommissions = async (month, year) => {
   const CommissionOverride = (await import('../commission/commissionOverride.model.js')).default;
   const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
   const Lead = (await import('../lead/lead.model.js')).default;
-  const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
 
   const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'staff', 'support', 'logistics'] }, isDeleted: false })
@@ -1467,7 +1439,7 @@ export const getAllStaffCommissions = async (month, year) => {
     Attendance.find({ date: { $gte: monthStart, $lte: monthEnd }, isDeleted: false }).select('user status').lean(),
     CommissionOverride.find({ month, year }).lean(),
     ReorderCommission.find({ month, year }).lean(),
-    getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, true)
+    getSynchronizedDeliveredOrders(monthStart, monthEnd, ShipmaxxOrder, ShipmaxxOrder, true)
   ]);
 
   for (const a of allAttendances) {
@@ -1619,7 +1591,6 @@ export const getRevenueChart = async (userRole, userId, period = 'monthly') => {
 
 export const getUnassignedOrders = async (month, year) => {
   const User = (await import('../user/user.model.js')).default;
-  const Order = (await import('../shiprocket/models/order.model.js')).Order;
   const ShipmaxxOrder = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
   const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'staff', 'support', 'logistics'] }, isDeleted: false }).select('_id role').lean();
   const allUserIds = new Set(allUsers.map(u => String(u._id)));
@@ -1628,7 +1599,7 @@ export const getUnassignedOrders = async (month, year) => {
   const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
   const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
 
-  const allOrders = await getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, true);
+  const allOrders = await getSynchronizedDeliveredOrders(monthStart, monthEnd, ShipmaxxOrder, ShipmaxxOrder, true);
   const unassigned = [];
   
   for (const o of allOrders) {
@@ -1649,7 +1620,7 @@ export const getUnassignedOrders = async (month, year) => {
     if (!uid || !allUserIds.has(uid)) {
       unassigned.push({
         _id: o._id,
-        platform: o.platform || (o.shiprocket_order_id ? 'shiprocket' : 'shipmaxx'),
+        platform: o.platform || 'shipmaxx',
         billing_customer_name: o.billing_customer_name,
         sub_total: o.sub_total || o.total,
         order_date: o.createdAt,
@@ -1668,12 +1639,7 @@ export const assignOrder = async (orderId, staffId, platform) => {
   const staff = await User.findById(staffId);
   if (!staff) throw new Error('Staff not found');
 
-  let OrderModel;
-  if (platform === 'shipmaxx') {
-    OrderModel = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
-  } else {
-    OrderModel = (await import('../shiprocket/models/order.model.js')).Order;
-  }
+  const { ShipmaxxOrder: OrderModel } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
 
   const order = await OrderModel.findById(orderId);
   if (!order) throw new Error('Order not found');
@@ -1689,7 +1655,6 @@ export const assignOrder = async (orderId, staffId, platform) => {
 export const getStaffDeliveryStats = async (month, year, filterUserId = null, from = null, to = null, preset = null) => {
   const User = (await import('../user/user.model.js')).default;
   const Lead = (await import('../lead/lead.model.js')).default;
-  const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
   const FollowupCommissionSettings = (await import('../commission/followupCommissionSettings.model.js')).default;
   let reorderSettings = await FollowupCommissionSettings.findOne().sort({ createdAt: -1 }).lean();
@@ -1713,18 +1678,15 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     createdAt: { $gte: rtoLookbackStart, $lte: monthEnd }
   };
 
-  const [synchronizedDelivered, rtoOrdersSM, rtoOrdersSR] = await Promise.all([
-    getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, false),
+  const [synchronizedDelivered, rtoOrdersSM] = await Promise.all([
+    getSynchronizedDeliveredOrders(monthStart, monthEnd, ShipmaxxOrder, ShipmaxxOrder, false),
     ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
-      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
-    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
   ]);
 
   const allOrders = [
     ...synchronizedDelivered.map(o => ({ ...o, type: 'delivered' })),
     ...rtoOrdersSM.map(o => ({ ...o, type: 'rto' })),
-    ...rtoOrdersSR.map(o => ({ ...o, type: 'rto' })),
   ];
 
   if (allOrders.length === 0) {
@@ -1743,7 +1705,7 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
   let unassignedDelivered = 0;
   let unassignedRto = 0;
 
-  const { phoneToSales, leadMap: histLeadMap } = await getPhoneToSalesAgentMap(Order, ShipmaxxOrder, Lead, statsMap, allOrders);
+  const { phoneToSales, leadMap: histLeadMap } = await getPhoneToSalesAgentMap(ShipmaxxOrder, ShipmaxxOrder, Lead, statsMap, allOrders);
 
   for (const o of allOrders) {
     const lId = o.lead_id ? String(o.lead_id) : null;

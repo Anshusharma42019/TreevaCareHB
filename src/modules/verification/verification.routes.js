@@ -122,8 +122,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
     try {
       const missing = records.filter(r => r.relief_percentage == null && r.lead);
       if (missing.length > 0) {
-        const { Order } = (await import('../shiprocket/models/order.model.js'));
-        const Followup = (await import('../shiprocket/models/followup.model.js')).default;
+        const { ShipmaxxOrder: Order } = (await import('../shipmaxx/models/shipmaxxOrder.model.js'));
+        const { ShipmaxxFollowup: Followup } = (await import('../shipmaxx/models/shipmaxxFollowup.model.js'));
         const leadIds = missing.map(r => r.lead?._id || r.lead).filter(Boolean);
         const orders = await Order.find({ lead_id: { $in: leadIds } }).select('_id lead_id').lean();
         const orderMap = {};
@@ -161,7 +161,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
     }
 
     const leadIds = records.map(r => r.lead?._id || r.lead).filter(Boolean);
-    const { Order } = (await import('../shiprocket/models/order.model.js'));
+    const { ShipmaxxOrder: Order } = (await import('../shipmaxx/models/shipmaxxOrder.model.js'));
     const orderCounts = await Order.aggregate([
       { $match: { lead_id: { $in: leadIds } } },
       { $group: { _id: '$lead_id', count: { $sum: 1 } } }
@@ -268,12 +268,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
           for (const task of newTasks) {
             try {
               if (task.lead) {
-                let detectedModel = 'ShiprocketOrder';
-                try {
-                  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
-                  const smxOrder = await ShipmaxxOrder.findOne({ lead_id: task.lead }).select('_id').lean();
-                  if (smxOrder) detectedModel = 'ShipmaxxOrder';
-                } catch (_) {}
+                const detectedModel = 'ShipmaxxOrder';
 
                 await appendOrderChain({
                   leadId:       task.lead,
@@ -595,7 +590,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     const skip = (page - 1) * limit;
     const paginatedRecords = sortedRecords.slice(skip, skip + limit);
 
-    const { Order } = (await import('../shiprocket/models/order.model.js'));
+    const { ShipmaxxOrder: Order } = (await import('../shipmaxx/models/shipmaxxOrder.model.js'));
     const leadIds = paginatedRecords.map(r => r.lead?._id || r.lead).filter(Boolean);
     const orderCounts = await Order.aggregate([
       { $match: { lead_id: { $in: leadIds } } },
@@ -805,31 +800,8 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
           const leadDoc = record.lead;  // already populated above
           const isRepeatOrder = !!(leadDoc?.pending_reorder_source);
           const orderType = isRepeatOrder ? 'repeat' : 'first';
+          const detectedOrderModel = 'ShipmaxxOrder';
 
-          // ── Detect the correct order model (ShiprocketOrder vs ShipmaxxOrder) ──
-          // Shipmaxx repeat orders arrive here via sendToVerification in shipmaxx.controller,
-          // which already calls appendOrderChain directly with 'ShipmaxxOrder'.
-          // For the generic verification PATCH, we detect by checking the source order's platform.
-          let detectedOrderModel = 'ShiprocketOrder'; // default
-          if (leadDoc?.pending_reorder_source) {
-            try {
-              // Check if the source order exists in ShipmaxxOrder collection first
-              const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
-              const smxSource = await ShipmaxxOrder.findById(leadDoc.pending_reorder_source).select('_id platform').lean();
-              if (smxSource) detectedOrderModel = 'ShipmaxxOrder';
-            } catch (_) { /* keep default ShiprocketOrder */ }
-          } else {
-            // No source order — check if any existing chain entries are Shipmaxx
-            const OrderChain = (await import('../commission/orderChain.model.js')).default;
-            const existingEntry = await OrderChain.findOne({ lead_id: leadId }).sort({ chain_seq: -1 }).lean();
-            if (existingEntry?.order_model === 'ShipmaxxOrder') detectedOrderModel = 'ShipmaxxOrder';
-          }
-
-          // Only create a repeat entry here; first-order entry was created at /sync time.
-          // If for any reason /sync was missed, appendOrderChain is idempotent and will
-          // create the first entry too (it checks for existing entries before inserting).
-          // Note: Shipmaxx repeat orders are ALREADY handled in shipmaxx.controller.js
-          // sendToVerification — this block handles Shiprocket + any edge cases.
           await appendOrderChain({
             leadId,
             orderId:      null,   // order not yet assigned at verification stage

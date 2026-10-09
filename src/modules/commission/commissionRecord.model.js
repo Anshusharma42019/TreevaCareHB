@@ -26,7 +26,7 @@ const commissionRecordSchema = new mongoose.Schema(
     // order_id is optional at verification-sync time (order not created yet).
     // It is set once the physical order is placed in Shiprocket/Shipmaxx.
     order_id:    { type: mongoose.Schema.Types.ObjectId, refPath: 'order_model', default: null, index: true, sparse: true },
-    order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShiprocketOrder' },
+    order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShipmaxxOrder' },
 
     // ── Customer ──────────────────────────────────────────────────────────────
     lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },

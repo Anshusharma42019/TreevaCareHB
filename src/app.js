@@ -5,7 +5,6 @@ import { config } from "./config/config.js";
 import { errorConverter, errorHandler } from "./middleware/error.js";
 import ApiError from "./utils/ApiError.js";
 import routes from "./routes/index.js";
-import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
 import { shipmaxxWebhook, runCronSyncWebhook } from "./modules/shipmaxx/shipmaxx.controller.js";
 import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
 import interaktController from "./modules/interakt/interakt.controller.js";
@@ -60,10 +59,6 @@ app.get("/", (req, res) => res.json({
   status: "success", 
   message: "Welcome to the API! The server is running smoothly." 
 }));
-
-// Shiprocket webhook (no auth — Shiprocket calls this directly)
-app.post("/webhook/shiprocket", webhook);
-app.post("/api/v1/webhook/shiprocket", webhook);
 
 // ShipMaxx webhook & Cron triggers (no auth — external callers)
 app.post("/webhook/shipmaxx", shipmaxxWebhook);

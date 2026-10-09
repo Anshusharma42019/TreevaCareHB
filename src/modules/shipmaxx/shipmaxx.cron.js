@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
 import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, setAutoFollowUps } from './shipmaxx.controller.js';
-import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
+import { generateReorderCommissions } from '../commission/commissionRecord.service.js';
 import { Lead } from '../lead/lead.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import { ShipmaxxFollowup as Followup } from './models/shipmaxxFollowup.model.js';
@@ -49,7 +49,14 @@ async function linkCrmFields(phone) {
   return fields;
 }
 
+let isCronRunning = false;
+
 export const runCronSync = async () => {
+  if (isCronRunning) {
+    console.log('[ShipMaxx Cron] ⚠ Previous cron run still in progress, skipping this tick.');
+    return;
+  }
+  isCronRunning = true;
   try {
     // Find active orders created since the start of the previous month
     const trackingLimit = new Date();
@@ -94,6 +101,37 @@ export const runCronSync = async () => {
               continue;
             }
           }
+
+          const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
+          const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+          const terminalStatuses = ['DELIVERED', 'RTO_DELIVERED', 'CANCELLED'];
+          const trackedStatuses = [
+            'OUT_FOR_DELIVERY', 'OUT_FOR_PICKUP', 'PICKUP_DONE',
+            'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED',
+            'DELIVERY_EXCEPTION', 'RTO_INITIATED', 'RTO_INTRANSIT', 'IN_TRANSIT'
+          ];
+          let shouldUpdateStatus = true;
+          if (existing) {
+            if (terminalStatuses.includes(existing.status)) {
+              // Terminal statuses never regress
+              shouldUpdateStatus = false;
+            } else if (trackedStatuses.includes(existing.status)) {
+              // Never downgrade verified in-transit or granular tracked statuses to coarse statuses
+              if (['PICKUP_SCHEDULED', 'SHIPPED', 'NEW', 'SHIPMENT_BOOKED'].includes(finalStatus)) {
+                shouldUpdateStatus = false;
+              } else if (existing.status !== 'IN_TRANSIT' && finalStatus === 'IN_TRANSIT') {
+                shouldUpdateStatus = true;
+              } else if (['OUT_FOR_DELIVERY', 'OUT_FOR_PICKUP', 'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED', 'RTO_INITIATED', 'RTO_INTRANSIT'].includes(existing.status) && finalStatus === 'IN_TRANSIT') {
+                shouldUpdateStatus = false;
+              } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
+                shouldUpdateStatus = false;
+              }
+            }
+          }
+
+          if (!shouldUpdateStatus && existing) {
+            statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+          }
           
           const updateData = {
             order_id: String(s.order_id || s.awb),
@@ -102,17 +140,6 @@ export const runCronSync = async () => {
             status_updated_at: statusUpdatedAt,
           };
 
-          const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
-          const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
-          let shouldUpdateStatus = true;
-          const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
-          if (existing) {
-            if (protectedStatuses.includes(existing.status)) {
-              shouldUpdateStatus = false;
-            } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
-              shouldUpdateStatus = false;
-            }
-          }
           if (shouldUpdateStatus) {
             updateData.status = finalStatus;
           }
@@ -200,14 +227,9 @@ export const runCronSync = async () => {
             const newStatus = normalizeShipmaxxStatus(rawStatus);
             const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
             const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
-            let shouldUpdateStatus = true;
-            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
-            if (existing) {
-              if (protectedStatuses.includes(existing.status)) {
-                shouldUpdateStatus = false;
-              } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(newStatus)) {
-                shouldUpdateStatus = false;
-              }
+            let shouldUpdateStatus = !existing;
+            if (existing && (!existing.status || existing.status === 'NEW')) {
+              shouldUpdateStatus = true;
             }
             if (shouldUpdateStatus) {
               ud.status = newStatus;
@@ -254,13 +276,12 @@ export const runCronSync = async () => {
       createdAt: { $gte: trackingLimit },
       $or: [
         { status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i } },
-        { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
-        { status: /^(delivered|rto_delivered)/i, delivered_at: null }
+        { status: /^delivered$/i, delivered_at: { $in: [null, undefined] } }
       ]
     }).sort({ status_updated_at: 1, createdAt: 1 }).limit(200).lean();
 
     let updatedCount = 0;
-    const BATCH_SIZE = 10;
+    const BATCH_SIZE = 3;
     for (let i = 0; i < activeOrders.length; i += BATCH_SIZE) {
       const batch = activeOrders.slice(i, i + BATCH_SIZE);
       await Promise.allSettled(batch.map(async (o) => {
@@ -272,24 +293,54 @@ export const runCronSync = async () => {
           
           if (rawStatus) {
             let status = normalizeShipmaxxStatus(rawStatus);
+            const history = tracking.history || [];
+            let attempts = 1;
+            if (Array.isArray(history) && history.length > 0) {
+              const attemptDates = new Set();
+              for (const h of history) {
+                const c = String(h.system_status_code || h.status || '').toUpperCase();
+                const n = String(h.system_status_name || h.description || '').toUpperCase();
+                const isUnd = c === 'UND' || n.includes('UNDELIVERED') || n.includes('REFUSED') || n.includes('NOT AVAILABLE') || n.includes('INCOMPLETE') || n.includes('ATTEMPT');
+                if (isUnd) {
+                  const d = String(h.date || h.timestamp || h.time || '').split(' ')[0].split('T')[0];
+                  if (d) attemptDates.add(d);
+                }
+              }
+              attempts = Math.max(1, attemptDates.size);
+            }
+
+            const latestHistoryEvent = history[0] || {};
+            const latestCode = String(latestHistoryEvent.system_status_code || latestHistoryEvent.status || '').toUpperCase();
+            const latestName = String(latestHistoryEvent.system_status_name || latestHistoryEvent.description || '').toUpperCase();
+
             const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
-            if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
-              const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+            if (latestCode === 'RTD' || latestName.includes('RTO DELIVERED') || latestName.includes('RTO_DELIVERED') || rawStatus === 'RTD' || rawStatus === 'RTO_DELIVERED') {
+              status = 'RTO_DELIVERED';
+            } else if (latestCode === 'RRA' || latestCode === 'RTO_INTRANSIT' || latestName.includes('RTO IN TRANSIT') || latestName.includes('RTO INTRANSIT') || rawStatus === 'RRA' || rawStatus === 'RTO_INTRANSIT') {
+              status = 'RTO_INTRANSIT';
+            } else if (latestCode === 'RTO_OFD' || latestName.includes('RTO OUT FOR DELIVERY') || rawStatus === 'RTO_OFD') {
+              status = 'RTO_OFD';
+            } else if (latestCode === 'RTO' || latestName === 'RTO' || latestName.includes('RTO INITIATED') || rawStatus === 'RTO' || rawStatus === 'RTO_INITIATED') {
+              status = 'RTO_INITIATED';
+            } else if (latestCode === 'DEL' || (latestName.includes('DELIVERED') && !latestName.includes('UNDELIVERED')) || rawStatus === 'DEL' || rawStatus === 'DELIVERED') {
+              status = 'DELIVERED';
+            } else if (latestCode === 'OFD' || latestName.includes('OUT FOR DELIVERY') || rawStatus === 'OFD' || rawStatus === 'OUT_FOR_DELIVERY') {
+              status = 'OUT_FOR_DELIVERY';
+            } else if (latestCode === 'OFP' || latestName.includes('OUT FOR PICKUP') || rawStatus === 'OFP' || rawStatus === 'OUT_FOR_PICKUP') {
+              status = 'OUT_FOR_PICKUP';
+            } else if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || latestCode === 'UND' || (ndrKw.some(k => status.includes(k) || latestName.includes(k)) && !status.includes('DELIVERED'))) {
+              status = attempts === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : attempts === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : attempts === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
             }
 
             const statusChanged = status !== o.status;
             let actualUpdatedAt;
-            if (statusChanged) {
-              if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
-                actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
-              } else {
-                actualUpdatedAt = new Date();
-              }
+            if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+              actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
             } else {
               actualUpdatedAt = o.status_updated_at || new Date();
             }
 
-            const update = { status, status_updated_at: actualUpdatedAt };
+            const update = { status, status_updated_at: actualUpdatedAt, delivery_attempt: attempts };
             
             if (status === 'DELIVERED') {
               let actualDeliveredAt = null;
@@ -306,8 +357,13 @@ export const runCronSync = async () => {
               if (actualDeliveredAt) {
                 update.delivered_at = actualDeliveredAt;
                 update.status_updated_at = actualDeliveredAt;
+              } else if (o.delivered_at) {
+                update.delivered_at = o.delivered_at;
+                update.status_updated_at = o.delivered_at;
               } else {
-                update.delivered_at = o.delivered_at || o.status_updated_at || (statusChanged ? new Date() : o.createdAt);
+                const fallbackDate = o.createdAt || new Date();
+                update.delivered_at = fallbackDate;
+                update.status_updated_at = fallbackDate;
               }
               if (o.lead_id) {
                 import('../lead/lead.model.js').then(({ Lead }) => {
@@ -331,7 +387,7 @@ export const runCronSync = async () => {
           console.error('[Cron] ShipMaxx tracking failed for AWB:', o.awb_code, e.message);
         }
       }));
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
     if (updatedCount > 0) {
       await generateReorderCommissions();
@@ -372,6 +428,8 @@ export const runCronSync = async () => {
     } else {
       console.error('[Cron] ShipMaxx auto-sync error:', error.message);
     }
+  } finally {
+    isCronRunning = false;
   }
 };
 

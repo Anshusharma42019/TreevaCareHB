@@ -9,7 +9,6 @@ import cnpRoute from '../modules/cnp/cnp.routes.js';
 import callAgainRoute from '../modules/callagain/callagain.routes.js';
 import verificationRoute from '../modules/verification/verification.routes.js';
 import readyToShipmentRoute from '../modules/readytoshipment/readytoshipment.routes.js';
-import shiprocketRoute from '../modules/shiprocket/shiprocket.routes.js';
 import attendanceRoute from '../modules/attendance/attendance.routes.js';
 import appointmentRoute from '../modules/appointment/appointment.routes.js';
 import searchRoute from '../modules/search/search.routes.js';
@@ -34,7 +33,6 @@ const defaultRoutes = [
   { path: '/call-again', route: callAgainRoute },
   { path: '/verification', route: verificationRoute },
   { path: '/ready-to-shipment', route: readyToShipmentRoute },
-  { path: '/shiprocket', route: shiprocketRoute },
   { path: '/attendance', route: attendanceRoute },
   { path: '/appointments', route: appointmentRoute },
   { path: '/search', route: searchRoute },

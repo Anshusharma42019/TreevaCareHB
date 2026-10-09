@@ -185,10 +185,22 @@ export const createWarehouse = (body) => post('/warehouses/create', body);
 // ── Invoice ───────────────────────────────────────────────────────────────────
 export const getInvoice = (order_id) => call('GET', `/invoice/order/${order_id}`, { responseType: 'arraybuffer' });
 
-// ── NDR ───────────────────────────────────────────────────────────────────────
+// ── NDR (Module 7) ────────────────────────────────────────────────────────────
 export const getNdrList    = (params)         => get('/ndr', params);
 export const ndrAction     = (ndr_id, body)   => post(`/ndr/${ndr_id}/action`, body);
 export const ndrBulkAction = (body)           => post('/ndr/bulk-action', body);
+
+// ── Bulk Download (Module 6) ──────────────────────────────────────────────────
+export const downloadBulkManifestPdf = (identifiers) => call('POST', '/bulk-download/manifest', { data: { identifiers }, responseType: 'arraybuffer' });
+
+// ── Weight Disputes ───────────────────────────────────────────────────────────
+export const getWeightDisputes       = (params)           => get('/weight-disputes', params);
+export const getWeightDisputeHistory = (dispute_id)       => get(`/weight-disputes/${dispute_id}/history`);
+export const acceptWeightDispute     = (dispute_id)       => post(`/weight-disputes/${dispute_id}/accept`, {});
+export const rejectWeightDispute     = (dispute_id, data) => call('POST', `/weight-disputes/${dispute_id}/reject`, {
+  data,
+  headers: { 'Content-Type': 'multipart/form-data' }
+});
 
 export default {
   login, setCredentials, setApiKey, setAuthUrl,
@@ -197,5 +209,7 @@ export default {
   cancelShipment, checkServiceability, getShipments, getShipmentById,
   getWarehouses, createWarehouse,
   getInvoice, downloadLabelPdf, downloadManifestHtml,
-  getNdrList, ndrAction, ndrBulkAction
+  downloadBulkManifestPdf,
+  getNdrList, ndrAction, ndrBulkAction,
+  getWeightDisputes, getWeightDisputeHistory, acceptWeightDispute, rejectWeightDispute
 };

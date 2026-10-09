@@ -21,7 +21,7 @@ const orderChainSchema = new mongoose.Schema(
 
     // ── Order reference (dynamic model — supports Shiprocket and Shipmaxx) ────
     order_id:    { type: mongoose.Schema.Types.ObjectId, refPath: 'order_model', default: null },
-    order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShiprocketOrder' },
+    order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShipmaxxOrder' },
 
     // ── Strict chronological position in this customer's chain ────────────────
     // Starts at 1 for the first order, increments by 1 for every subsequent order.

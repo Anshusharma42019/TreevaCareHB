@@ -13,7 +13,6 @@ import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import CallAgain from '../callagain/callagain.model.js';
 import Cnp from '../cnp/cnp.model.js';
 import Appointment from '../appointment/appointment.model.js';
-import { Order as ShiprocketOrder } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import {
   InterestedLead,
@@ -75,11 +74,9 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
   };
 
   try {
-    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered, interested, notInterested, callAgainPhones, cnpPhones] = await Promise.all([
+    const [leadPhones, maxxPhones, smDelivered, interested, notInterested, callAgainPhones, cnpPhones] = await Promise.all([
       safeQuery(Lead.find(baseMatch).select('phone').limit(30).lean()),
-      safeQuery(ShiprocketOrder.find(orderMatch).select('billing_phone').limit(30).lean()),
       safeQuery(ShipmaxxOrder.find(orderMatch).select('billing_phone').limit(30).lean()),
-      safeQuery((getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).select('billing_phone').limit(30).lean()),
       safeQuery((getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).select('billing_phone').limit(30).lean()),
       safeQuery(InterestedLead.find(baseMatch).select('phone').limit(30).lean()),
       safeQuery(NotInterestedLead.find(baseMatch).select('phone').limit(30).lean()),
@@ -94,9 +91,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
       }
     };
     leadPhones.forEach(l => addPhone(l.phone));
-    orderPhones.forEach(o => addPhone(o.billing_phone));
     maxxPhones.forEach(o => addPhone(o.billing_phone));
-    srDelivered.forEach(o => addPhone(o.billing_phone));
     smDelivered.forEach(o => addPhone(o.billing_phone));
     interested.forEach(l => addPhone(l.phone));
     notInterested.forEach(l => addPhone(l.phone));
@@ -125,10 +120,6 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
     callAgains, 
     cnps,
     appointments,
-    shiprocketOrders,
-    shiprocketDelivered,
-    shiprocketInTransit,
-    shiprocketRto,
     shipmaxxOrders,
     shipmaxxDelivered,
     shipmaxxInTransit,
@@ -146,11 +137,6 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
     safeQuery(CallAgain.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone, 'i') }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()),
     safeQuery(Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone, 'i') }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()),
     safeQuery(Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone, 'i') }] : [])] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean()),
-    
-    safeQuery(ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
-    safeQuery((getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
-    safeQuery((getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
-    safeQuery((getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
     
     safeQuery(ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verified_by', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
     safeQuery((getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean()),
@@ -252,7 +238,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
 
   rtsRecords.forEach(r => {
     const latestNote = r.notes && r.notes.length > 0 ? r.notes[r.notes.length - 1].text : (r.description || '');
-    addResult(r, 'rts', 'Ready to Shipment', r.lead?.phone, r.lead?.name || r.title, r.sentToShiprocket ? 'Sent to Shiprocket' : 'Pending', `/ready-to-shipment?openId=${r._id}`, r.assignedTo?.name, latestNote, r.lead?._id?.toString() || r.lead?.toString());
+    addResult(r, 'rts', 'Ready to Shipment', r.lead?.phone, r.lead?.name || r.title, r.sentToShiprocket ? 'Sent to Shipping' : 'Pending', `/ready-to-shipment?openId=${r._id}`, r.assignedTo?.name, latestNote, r.lead?._id?.toString() || r.lead?.toString());
   });
 
   callAgains.forEach(c => {
@@ -294,30 +280,6 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics', 'docto
     const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.note || '');
     addResult(o, 'order', 'Verified Orders', o.phone, o.name, 'Verified', `/ready-to-shipment?openId=${o._id}`, o.assignedTo?.name, latestNote, o._id.toString());
   });
-
-  const processedOrders = new Set();
-  const processShiprocket = (ordersArr) => {
-    ordersArr.forEach(o => {
-      const uniqueKey = o.order_id || o.awb_code || o._id.toString();
-      if (processedOrders.has(uniqueKey)) return;
-      processedOrders.add(uniqueKey);
-      const latestNote = o.notes || '';
-      
-      let moduleName = 'Shiprocket';
-      let link = `/shiprocket/orders?openId=${o._id}`;
-      
-      if (o.status === 'DELIVERED') {
-         moduleName = 'Follow Up';
-         link = `/follow-up?openId=${o._id}`;
-      }
-      
-      addResult(o, 'order', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, o.verification_id?.assignedTo?.name || o.verification_staff_id?.name || o.lead_id?.assignedTo?.name, latestNote, o.lead_id?._id?.toString() || o.lead_id?.toString());
-    });
-  };
-  processShiprocket(shiprocketOrders);
-  processShiprocket(shiprocketDelivered);
-  processShiprocket(shiprocketInTransit);
-  processShiprocket(shiprocketRto);
 
   const processedMaxxOrders = new Set();
   const processShipmaxx = (ordersArr) => {

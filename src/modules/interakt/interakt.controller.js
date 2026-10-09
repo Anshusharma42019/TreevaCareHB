@@ -8,7 +8,6 @@ import streamifier from 'streamifier';
 import cloudinary from '../../config/cloudinary.js';
 import { sendWhatsAppMessage, sendInteraktChatMessage, getApprovedTemplates } from './interakt.service.js';
 import { createNotification } from '../notification/notification.service.js';
-import { Order } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import { detectDepartmentFromText } from '../../utils/departmentKeywords.js';
 
@@ -156,22 +155,13 @@ const handleWebhook = catchAsync(async (req, res) => {
         
         // Save WhatsApp reply directly to any active/recent shipments for Ops Dashboard tracking
         try {
-          await Promise.all([
-            Order.updateMany(
-              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
-              { 
-                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
-                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
-              }
-            ),
-            ShipmaxxOrder.updateMany(
-              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
-              { 
-                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
-                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
-              }
-            )
-          ]);
+          await ShipmaxxOrder.updateMany(
+            { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
+            { 
+              $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
+              $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
+            }
+          );
           console.log(`[Interakt Webhook] Updated shipments for phone ${normalizedPhone} with reply: ${cleanReplyText}`);
         } catch (shipErr) {
           console.error('[Interakt Webhook] Failed to update shipment reply:', shipErr.message);

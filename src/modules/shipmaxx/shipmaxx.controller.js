@@ -7,12 +7,12 @@ import { ShipmaxxDeliveredOrder as DeliveredOrder } from './models/shipmaxxDeliv
 import { ShipmaxxInTransitOrder as InTransitOrder } from './models/shipmaxxInTransitOrder.model.js';
 import { ShipmaxxReadyToShipment as ReadyToShipment } from './models/shipmaxxReadyToShipment.model.js';
 import { ShipmaxxRtoOrder as RTOOrder } from './models/shipmaxxRtoOrder.model.js';
-import { ShipmaxxReturn as ShiprocketReturn } from './models/shipmaxxReturn.model.js';
+import { ShipmaxxReturn } from './models/shipmaxxReturn.model.js';
 import { Lead } from '../lead/lead.model.js';
-import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
+import { NdrNote } from './models/ndrNote.model.js';
 import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
-import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
+import { getNextOrderId, peekNextOrderId } from './models/counter.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import * as leadService from '../lead/lead.service.js';
 // ── Commission workflow: append-only chain + submitter lock ──────────────────
@@ -136,55 +136,57 @@ export const setAutoFollowUps = async (orderId, deliveredAt) => {
   }
 };
 
-// Helper to safely parse ShipMaxx timestamps which might be in DD-MM-YYYY HH:mm:ss format
+// Helper to safely parse ShipMaxx timestamps which might be in DD-MMM-YYYY, DD-MM-YYYY, or ISO format
 export const parseShipMaxxDate = (dateStr) => {
-  if (!dateStr) return new Date();
-  const parts = String(dateStr).trim().match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (parts) {
-    // Let's use Date.parse to safely fallback if needed, but since it's tricky, we'll try to swap them if month > 12.
-    let [_, p1, p2, y, h, min, s] = parts;
-    let m = p2, d = p1;
-    if (Number(p1) <= 12 && Number(p2) > 12) { m = p1; d = p2; } // format was MM-DD-YYYY
-    else if (Number(p1) > 12 && Number(p2) <= 12) { d = p1; m = p2; } // format was DD-MM-YYYY
-    // Construct local IST datetime
-    return new Date(`${y}-${m}-${d}T${h || '00'}:${min || '00'}:${s || '00'}+05:30`);
+  if (!dateStr) return null;
+  const s = String(dateStr).trim();
+  const mAlpha = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (mAlpha) {
+    const months = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
+    const d = mAlpha[1].padStart(2, '0');
+    const mo = months[mAlpha[2].toLowerCase()] || '01';
+    const y = mAlpha[3];
+    const h = (mAlpha[4] || '00').padStart(2, '0');
+    const min = (mAlpha[5] || '00').padStart(2, '0');
+    const sec = (mAlpha[6] || '00').padStart(2, '0');
+    return new Date(`${y}-${mo}-${d}T${h}:${min}:${sec}+05:30`);
   }
-  return new Date(dateStr);
+  const parts = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (parts) {
+    let [_, p1, p2, y, h, min, sec] = parts;
+    let m = p2, d = p1;
+    if (Number(p1) <= 12 && Number(p2) > 12) { m = p1; d = p2; }
+    else if (Number(p1) > 12 && Number(p2) <= 12) { d = p1; m = p2; }
+    return new Date(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T${(h || '00').padStart(2, '0')}:${(min || '00').padStart(2, '0')}:${(sec || '00').padStart(2, '0')}+05:30`);
+  }
+  const iso = new Date(s);
+  return isNaN(iso.getTime()) ? null : iso;
 };
 
 export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
-  let actualUpdatedAt = new Date();
   if (tracking && tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
     const sortedHistory = [...tracking.history].sort((a, b) => {
-      const d1 = parseShipMaxxDate(a.date || a.timestamp || a.time).getTime();
-      const d2 = parseShipMaxxDate(b.date || b.timestamp || b.time).getTime();
-      return isNaN(d1) || isNaN(d2) ? 0 : d2 - d1; // newest first
+      const d1 = parseShipMaxxDate(a.date || a.timestamp || a.time)?.getTime() || 0;
+      const d2 = parseShipMaxxDate(b.date || b.timestamp || b.time)?.getTime() || 0;
+      return d2 - d1; // newest first
     });
-    let oldestConsecutiveDateStr = null;
-    const baseStatus = String(currentNormalizedStatus).replace(/_1ST_ATTEMPT|_2ND_ATTEMPT|_3RD_ATTEMPT|_ATTEMPT_FAILURE|_FAILURE/i, '');
-    for (let i = 0; i < sortedHistory.length; i++) {
-      const h = sortedHistory[i];
-      const hRawStatus = h.system_status_code || h.status || h.shipment_status || h.delivery_status;
-      if (hRawStatus) {
-        let hStatus = normalizeShipmaxxStatus(hRawStatus);
-        if (hStatus === 'UNDELIVERED_ATTEMPT_FAILURE') hStatus = 'UNDELIVERED';
-        const compareBase = baseStatus === 'UNDELIVERED_ATTEMPT_FAILURE' ? 'UNDELIVERED' : baseStatus;
-        if (hStatus === compareBase) {
-          oldestConsecutiveDateStr = h.date || h.timestamp || h.time;
-        } else {
-          break; // status changed, stop looking back
-        }
+    const isAttempt = /UNDELIVERED/i.test(currentNormalizedStatus);
+    if (isAttempt) {
+      const latestAttempt = sortedHistory.find(h => {
+        const c = String(h.system_status_code || h.status || '').toUpperCase();
+        const n = String(h.system_status_name || h.description || '').toUpperCase();
+        return c === 'UND' || n.includes('UNDELIVERED') || n.includes('REFUSED') || n.includes('NOT AVAILABLE') || n.includes('INCOMPLETE') || n.includes('ATTEMPT');
+      });
+      if (latestAttempt) {
+        const parsed = parseShipMaxxDate(latestAttempt.date || latestAttempt.timestamp || latestAttempt.time);
+        if (parsed && !isNaN(parsed.getTime())) return parsed;
       }
     }
-    const dateStr = oldestConsecutiveDateStr || sortedHistory[0].date || sortedHistory[0].timestamp || sortedHistory[0].time;
-    if (dateStr) {
-      const parsedDate = parseShipMaxxDate(dateStr);
-      if (parsedDate && !isNaN(parsedDate.getTime())) {
-        actualUpdatedAt = parsedDate;
-      }
-    }
+    const latest = sortedHistory[0];
+    const parsed = parseShipMaxxDate(latest.date || latest.timestamp || latest.time);
+    if (parsed && !isNaN(parsed.getTime())) return parsed;
   }
-  return actualUpdatedAt;
+  return new Date();
 };
 
 
@@ -781,6 +783,37 @@ const ATTEMPT_STATUSES_RE = /^(undelivered_1st_attempt|undelivered_2nd_attempt|u
 // These represent WHERE orders ARE now, not WHAT happened on a specific day
 const PIPELINE_STATUSES_RE = /^(new|pickup_scheduled|shipped|in_transit|rto_initiated|rto_in_transit|rto_intransit|rto_ofd|rto_undelivered|received_at_rts_hub|recd_at_dc_rts|rto_int|rto_it|rto-it|out_for_pickup|pickup_done|reached_at_destination_hub|reached_back_at_seller_city|misrouted|damaged|lost|shipment_booked|invoiced|spb|spd|int|ofp|pkd|rto|rra|run|out_for_delivery|ofd)$/i;
 
+export const buildShipmaxxDateMatch = (queryStatus, from, to) => {
+  if (!from || !to) return null;
+  const s = String(queryStatus || '').trim().toLowerCase();
+  // Pipeline statuses represent live current state and should not be wiped out by date filters
+  if (PIPELINE_STATUSES_RE.test(s)) {
+    return null;
+  }
+  const dateFilter = {
+    $gte: new Date(from + 'T00:00:00.000+05:30'),
+    $lte: new Date(to + 'T23:59:59.999+05:30'),
+  };
+
+  const isTerminal = /^(delivered|rto_delivered|DEL|RTD)$/i.test(queryStatus || '');
+  if (isTerminal) {
+    return {
+      $or: [
+        { delivered_at: dateFilter },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] },
+      ]
+    };
+  } else {
+    return {
+      $or: [
+        { status_updated_at: dateFilter },
+        { createdAt: dateFilter }
+      ]
+    };
+  }
+};
+
 export const getDeliveredStats = catchAsync(async (req, res) => {
   const { from, to, department } = req.query;
 
@@ -790,71 +823,55 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   ];
 
   if (department && department !== 'all') {
-    baseConditions.push({ department });
-  } else {
-    baseConditions.push({ department: { $in: ['male', 'ortho', 'skin'] } });
+    if (department === 'male') {
+      baseConditions.push({
+        $or: [
+          { department: 'male' },
+          { department: null },
+          { department: { $exists: false } }
+        ]
+      });
+    } else {
+      baseConditions.push({ department });
+    }
   }
 
   if (from && to) {
-    const dateFilter = {
-      $gte: new Date(from + 'T00:00:00.000+05:30'),
-      $lte: new Date(to + 'T23:59:59.999+05:30'),
+    const terminalDateClause = buildShipmaxxDateMatch('DELIVERED', from, to);
+    const nonTerminalDateClause = {
+      $or: [
+        { status_updated_at: { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') } },
+        { createdAt: { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') } },
+      ]
     };
+
     baseConditions.push({
       $or: [
-        // ── DELIVERED: filter by delivered_at, fallback to status_updated_at, then createdAt ──
-        { status: /^delivered$/i, delivered_at: dateFilter },
-        { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-        { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], $and: [{ $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }], createdAt: dateFilter },
-        // RTO_DELIVERED: same logic
-        { status: /^rto_delivered$/i, delivered_at: dateFilter },
-        { status: /^rto_delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-        // Short codes (DEL, RTD)
-        { status: /^DEL$/i, delivered_at: dateFilter },
-        { status: /^DEL$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-        { status: /^RTD$/i, delivered_at: dateFilter },
-        { status: /^RTD$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-        // ── CANCELLED: filter by status_updated_at or createdAt ───────────────
-        { status: /^cancell?ed$/i, status_updated_at: dateFilter },
-        { status: /^cancell?ed$/i, status_updated_at: { $exists: false }, createdAt: dateFilter },
-        { status: /^cancell?ed$/i, status_updated_at: null, createdAt: dateFilter },
-        // ── ATTEMPT statuses: filter by when the attempt happened ─────────────
-        // Shows only today's failed delivery attempts / pickup failures
-        { status: ATTEMPT_STATUSES_RE, status_updated_at: dateFilter },
-        { status: ATTEMPT_STATUSES_RE, $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }], createdAt: dateFilter },
-        // ── PIPELINE statuses: show live current count for recent shipments (last 38 days)
-        // Older shipments are no longer tracked by the cron and may have stale statuses.
-        { status: PIPELINE_STATUSES_RE, createdAt: { $gte: new Date(Date.now() - 38 * 24 * 60 * 60 * 1000) } },
+        { status: /^(delivered|rto_delivered|DEL|RTD)$/i, ...terminalDateClause },
+        { status: { $regex: PIPELINE_STATUSES_RE } },
+        { status: { $not: /^(delivered|rto_delivered|DEL|RTD)$/i }, ...nonTerminalDateClause },
       ]
     });
   }
 
   const match = { $and: baseConditions };
 
-  // Build a clean DELIVERED-only date query (independent of the main match $or)
-  // Fallback: if delivered_at is null/missing, use status_updated_at, then createdAt
   const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
-  const deptCond = (department && department !== 'all') ? { department } : { department: { $in: ['male', 'ortho', 'skin'] } };
+  const deptCond = (department && department !== 'all') ? { department } : {};
   let deliveredOnlyMatch;
   if (from && to) {
-    const dateFilter = { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') };
+    const terminalDateClause = buildShipmaxxDateMatch('DELIVERED', from, to);
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
+      'order_items.name': { $not: /migraine|piles/i },
       ...deptCond,
-      $and: [
-        { status: statusFilter },
-        {
-          $or: [
-            { delivered_at: dateFilter },
-            { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
-            { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] },
-          ]
-        }
-      ]
+      status: statusFilter,
+      ...terminalDateClause
     };
   } else {
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
+      'order_items.name': { $not: /migraine|piles/i },
       ...deptCond,
       status: statusFilter
     };
@@ -949,6 +966,9 @@ const STATUS_ALIASES = {
   RTO_IN_TRANSIT: ['RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA'],
   NEW: ['NEW', 'NFI', 'SPB'],
   UNDELIVERED: ['UNDELIVERED', 'UND', 'UNDELIVERED_ATTEMPT_FAILURE', 'UNDELIVERED_FAILURE'],
+  UNDELIVERED_1ST_ATTEMPT: ['UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED-1ST_ATTEMPT', 'UNDELIVERED 1ST ATTEMPT'],
+  UNDELIVERED_2ND_ATTEMPT: ['UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED-2ND_ATTEMPT', 'UNDELIVERED 2ND ATTEMPT'],
+  UNDELIVERED_3RD_ATTEMPT: ['UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED-3RD_ATTEMPT', 'UNDELIVERED 3RD ATTEMPT'],
   CANCELLED: ['CANCELLED', 'CANCELED', 'SC'],
   DELIVERED: ['DELIVERED', 'DEL'],
   RTO_DELIVERED: ['RTO_DELIVERED', 'RTD'],
@@ -962,7 +982,7 @@ const STATUS_ALIASES = {
   DELIVERY_EXCEPTION: ['DELIVERY_EXCEPTION', 'DEX'],
   DAMAGED: ['DAMAGED', 'DMG'],
   LOST: ['LOST', 'LOS'],
-  RTO_INITIATED: ['RTO_INITIATED', 'RTO', 'RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA', 'RTO_OFD', 'RTO_UNDELIVERED', 'RUN', 'RECEIVED_AT_RTS_HUB', 'RECD_AT_DC_RTS', 'REACHED_BACK_AT_SELLER_CITY'],
+  RTO_INITIATED: ['RTO_INITIATED', 'RTO', 'RUN', 'RTO_UNDELIVERED', 'RECEIVED_AT_RTS_HUB', 'RECD_AT_DC_RTS', 'REACHED_BACK_AT_SELLER_CITY'],
   RTO_UNDELIVERED: ['RTO_UNDELIVERED', 'RUN'],
   SHIPMENT_BOOKED: ['SHIPMENT_BOOKED', 'SPB'],
   DISPOSED_OFF: ['DISPOSED_OFF', 'CUN'],
@@ -990,9 +1010,17 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   ];
 
   if (department && department !== 'all') {
-    baseConditions.push({ department });
-  } else {
-    baseConditions.push({ department: { $in: ['male', 'ortho', 'skin'] } });
+    if (department === 'male') {
+      baseConditions.push({
+        $or: [
+          { department: 'male' },
+          { department: null },
+          { department: { $exists: false } }
+        ]
+      });
+    } else {
+      baseConditions.push({ department });
+    }
   }
 
   // Build status variants: use alias map if available, otherwise fall back to short-code reverse lookup
@@ -1007,50 +1035,9 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   // Flexible case-insensitive match for each variant (allowing space, hyphen, or underscore)
   baseConditions.push({ status: { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) } });
 
-  if (from && to) {
-    const dateFilter = {
-      $gte: new Date(from + 'T00:00:00.000+05:30'),
-      $lte: new Date(to + 'T23:59:59.999+05:30'),
-    };
-
-    let dateOrClause;
-    if (/^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus)) {
-      // Terminal status: prefer delivered_at, fallback to status_updated_at, then createdAt
-      dateOrClause = {
-        $or: [
-          { delivered_at: dateFilter },
-          { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
-          { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] },
-        ]
-      };
-    } else if (/^cancell?ed$/i.test(queryStatus)) {
-      // Cancelled: apply date filter
-      dateOrClause = {
-        $or: [
-          { status_updated_at: dateFilter },
-          { status_updated_at: { $exists: false }, createdAt: dateFilter },
-          { status_updated_at: null, createdAt: dateFilter },
-        ]
-      };
-    } else if (ATTEMPT_STATUSES_RE.test(queryStatus)) {
-      // ATTEMPT statuses (UNDELIVERED_*, PICKUP_FAILED, etc.): filter by status_updated_at
-      // Shows only orders whose delivery attempt happened within the date range
-      dateOrClause = {
-        $or: [
-          { status_updated_at: dateFilter },
-          { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }], createdAt: dateFilter },
-        ]
-      };
-    } else if (PIPELINE_STATUSES_RE.test(queryStatus)) {
-      // Pipeline statuses: restrict to last 38 days to match board counts and exclude stale untracked shipments
-      dateOrClause = {
-        createdAt: { $gte: new Date(Date.now() - 38 * 24 * 60 * 60 * 1000) }
-      };
-    }
-
-    if (dateOrClause) {
-      baseConditions.push(dateOrClause);
-    }
+  const dateClause = buildShipmaxxDateMatch(queryStatus, from, to);
+  if (dateClause) {
+    baseConditions.push(dateClause);
   }
 
   const match = { $and: baseConditions };
@@ -1348,7 +1335,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
     // Status normalization (fast, DB only)
     await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_BOOKED' }, { $set: { status: 'IN_TRANSIT' } }).catch(() => { });
     await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_CANCELLED' }, { $set: { status: 'CANCELLED' } }).catch(() => { });
-    await Order.updateMany({ platform: 'shipmaxx', status: 'RTO_INTRANSIT' }, { $set: { status: 'RTO_IN_TRANSIT' } }).catch(() => { });
+    await Order.updateMany({ platform: 'shipmaxx', status: { $in: ['RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT'] } }, { $set: { status: 'RTO_INTRANSIT' } }).catch(() => { });
     for (const [sc, fs] of Object.entries(SMX_STATUS_MAP)) {
       if (sc.toUpperCase() === fs.toUpperCase()) continue;
       await Order.updateMany({ platform: 'shipmaxx', status: new RegExp(`^${sc}$`, 'i') }, { $set: { status: fs } }).catch(() => { });
@@ -1380,19 +1367,37 @@ export const runSyncInBackground = async (mode = 'quick') => {
               if (newStatus === 'UNKNOWN') finalStatus = existing.status;
             }
 
-            const updateData = { order_id: String(s.order_id || s.awb), awb_code: String(s.awb || ''), platform: 'shipmaxx', status_updated_at: statusUpdatedAt };
-
             const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
             const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+            const terminalStatuses = ['DELIVERED', 'RTO_DELIVERED', 'CANCELLED'];
+            const trackedStatuses = [
+              'OUT_FOR_DELIVERY', 'OUT_FOR_PICKUP', 'PICKUP_DONE',
+              'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED',
+              'DELIVERY_EXCEPTION', 'RTO_INITIATED', 'RTO_INTRANSIT', 'IN_TRANSIT'
+            ];
             let shouldUpdateStatus = true;
-            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
             if (existing) {
-              if (protectedStatuses.includes(existing.status)) {
+              if (terminalStatuses.includes(existing.status)) {
                 shouldUpdateStatus = false;
-              } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
-                shouldUpdateStatus = false;
+              } else if (trackedStatuses.includes(existing.status)) {
+                if (['PICKUP_SCHEDULED', 'SHIPPED', 'NEW', 'SHIPMENT_BOOKED'].includes(finalStatus)) {
+                  shouldUpdateStatus = false;
+                } else if (existing.status !== 'IN_TRANSIT' && finalStatus === 'IN_TRANSIT') {
+                  shouldUpdateStatus = true;
+                } else if (['OUT_FOR_DELIVERY', 'OUT_FOR_PICKUP', 'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED', 'RTO_INITIATED', 'RTO_INTRANSIT'].includes(existing.status) && finalStatus === 'IN_TRANSIT') {
+                  shouldUpdateStatus = false;
+                } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
+                  shouldUpdateStatus = false;
+                }
               }
             }
+
+            if (!shouldUpdateStatus && existing) {
+              statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+            }
+
+            const updateData = { order_id: String(s.order_id || s.awb), awb_code: String(s.awb || ''), platform: 'shipmaxx', status_updated_at: statusUpdatedAt };
+
             if (shouldUpdateStatus) {
               updateData.status = finalStatus;
             }
@@ -1449,14 +1454,9 @@ export const runSyncInBackground = async (mode = 'quick') => {
               const newStatus = normalizeShipmaxxStatus(rawStatus);
               const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
               const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
-              let shouldUpdateStatus = true;
-              const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
-              if (existing) {
-                if (protectedStatuses.includes(existing.status)) {
-                  shouldUpdateStatus = false;
-                } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(newStatus)) {
-                  shouldUpdateStatus = false;
-                }
+              let shouldUpdateStatus = !existing;
+              if (existing && (!existing.status || existing.status === 'NEW')) {
+                shouldUpdateStatus = true;
               }
               if (shouldUpdateStatus) {
                 ud.status = newStatus;
@@ -1516,7 +1516,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
     if (!isTimedOut()) {
       const activeOrders = await Order.find({ platform: 'shipmaxx', awb_code: { $exists: true, $ne: '' }, status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i } }).lean();
       console.log(`[Sync] Tracking ${activeOrders.length} active orders...`);
-      const BATCH = 10;
+      const BATCH = 3;
       for (let i = 0; i < activeOrders.length; i += BATCH) {
         if (isTimedOut()) { console.log(`[Sync] ⚠ Timed out at ${i}/${activeOrders.length}`); break; }
         await Promise.allSettled(activeOrders.slice(i, i + BATCH).map(async (o) => {
@@ -1526,12 +1526,46 @@ export const runSyncInBackground = async (mode = 'quick') => {
             const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
             if (!rawStatus) return;
             let status = normalizeShipmaxxStatus(rawStatus);
+            const history = tracking.history || [];
+            let attempts = 1;
+            if (Array.isArray(history) && history.length > 0) {
+              const attemptDates = new Set();
+              for (const h of history) {
+                const c = String(h.system_status_code || h.status || '').toUpperCase();
+                const n = String(h.system_status_name || h.description || '').toUpperCase();
+                const isUnd = c === 'UND' || n.includes('UNDELIVERED') || n.includes('REFUSED') || n.includes('NOT AVAILABLE') || n.includes('INCOMPLETE') || n.includes('ATTEMPT');
+                if (isUnd) {
+                  const d = String(h.date || h.timestamp || h.time || '').split(' ')[0].split('T')[0];
+                  if (d) attemptDates.add(d);
+                }
+              }
+              attempts = Math.max(1, attemptDates.size);
+            }
+
+            const latestHistoryEvent = history[0] || {};
+            const latestCode = String(latestHistoryEvent.system_status_code || latestHistoryEvent.status || '').toUpperCase();
+            const latestName = String(latestHistoryEvent.system_status_name || latestHistoryEvent.description || '').toUpperCase();
+
             const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
-            if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
-              const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+            if (latestCode === 'RTD' || latestName.includes('RTO DELIVERED') || latestName.includes('RTO_DELIVERED') || rawStatus === 'RTD' || rawStatus === 'RTO_DELIVERED') {
+              status = 'RTO_DELIVERED';
+            } else if (latestCode === 'RRA' || latestCode === 'RTO_INTRANSIT' || latestName.includes('RTO IN TRANSIT') || latestName.includes('RTO INTRANSIT') || rawStatus === 'RRA' || rawStatus === 'RTO_INTRANSIT') {
+              status = 'RTO_INTRANSIT';
+            } else if (latestCode === 'RTO_OFD' || latestName.includes('RTO OUT FOR DELIVERY') || rawStatus === 'RTO_OFD') {
+              status = 'RTO_OFD';
+            } else if (latestCode === 'RTO' || latestName === 'RTO' || latestName.includes('RTO INITIATED') || rawStatus === 'RTO' || rawStatus === 'RTO_INITIATED') {
+              status = 'RTO_INITIATED';
+            } else if (latestCode === 'DEL' || (latestName.includes('DELIVERED') && !latestName.includes('UNDELIVERED')) || rawStatus === 'DEL' || rawStatus === 'DELIVERED') {
+              status = 'DELIVERED';
+            } else if (latestCode === 'OFD' || latestName.includes('OUT FOR DELIVERY') || rawStatus === 'OFD' || rawStatus === 'OUT_FOR_DELIVERY') {
+              status = 'OUT_FOR_DELIVERY';
+            } else if (latestCode === 'OFP' || latestName.includes('OUT FOR PICKUP') || rawStatus === 'OFP' || rawStatus === 'OUT_FOR_PICKUP') {
+              status = 'OUT_FOR_PICKUP';
+            } else if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || latestCode === 'UND' || (ndrKw.some(k => status.includes(k) || latestName.includes(k)) && !status.includes('DELIVERED'))) {
+              status = attempts === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : attempts === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : attempts === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
             }
             const statusChanged = status !== o.status;
-            const update = { status };
+            const update = { status, delivery_attempt: attempts };
             if (!o.courier_name && o.awb_code) { const g = guessCourierByAwb(o.awb_code); if (g) update.courier_name = g; }
             if (statusChanged) {
               // Status changed — derive real timestamp from history, fall back to now
@@ -1553,8 +1587,8 @@ export const runSyncInBackground = async (mode = 'quick') => {
             updatedCount++;
           } catch (err) { console.error(`[Sync] AWB ${o.awb_code}:`, err.message); }
         }));
-        // Wait 1.5 seconds between batches to avoid rate limit
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        // Wait 600ms between batches to avoid rate limit
+        await new Promise(resolve => setTimeout(resolve, 600));
       }
       console.log(`[Sync] Tracking done (${updatedCount} updated, ${Math.round((Date.now() - syncStart) / 1000)}s)`);
     }
@@ -2596,28 +2630,8 @@ export const createManualFollowup = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, newOrder, 'Manual followup added successfully'));
 });
 
-// Temporarily adding a cleanup endpoint to remove Shiprocket duplicates
-import { Order as ShiprocketOrder } from '../shiprocket/models/order.model.js';
 export const cleanupDuplicates = catchAsync(async (req, res) => {
-  const srOrders = await ShiprocketOrder.find({}).select('awb_code order_id').lean();
-  const srAwbs = srOrders.map(o => o.awb_code).filter(Boolean);
-  const srIds = srOrders.map(o => o.order_id).filter(Boolean);
-
-  if (srAwbs.length === 0 && srIds.length === 0) {
-    return res.json(new ApiResponse(200, { deleted: 0 }, 'No Shiprocket data found'));
-  }
-
-  const query = { $or: [] };
-  if (srAwbs.length > 0) query.$or.push({ awb_code: { $in: srAwbs } });
-  if (srIds.length > 0) query.$or.push({ order_id: { $in: srIds } });
-
-  const overlap = await Order.find(query).lean();
-  if (overlap.length > 0) {
-    const result = await Order.deleteMany(query);
-    return res.json(new ApiResponse(200, { found: overlap.length, deleted: result.deletedCount }, 'Cleaned up overlapping records'));
-  }
-
-  res.json(new ApiResponse(200, { deleted: 0 }, 'No overlapping orders found in ShipMaxx DB'));
+  return res.json(new ApiResponse(200, { deleted: 0 }, 'Cleanup duplicates completed'));
 });
 
 export const debugBackfillDelivered = catchAsync(async (req, res) => {
@@ -2794,13 +2808,53 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
   }
 });
 
-// ── NDR ───────────────────────────────────────────────────────────────────────
 export const getNdrList = catchAsync(async (req, res) => {
   try {
     const response = await smx.getNdrList(req.query);
-    const list = response?.data?.data || response?.data || response || [];
-    if (Array.isArray(list) && list.length > 0) {
-      return res.json(new ApiResponse(200, response, 'NDR list fetched from Shipmaxx API'));
+    const rawShipments = response?.shipments || response?.data?.shipments || response?.data?.data || response?.data;
+    if (Array.isArray(rawShipments) && rawShipments.length > 0) {
+      // Fetch local orders to resolve departments & full customer details if available
+      const awbs = rawShipments.map(s => s.awb || s.awb_code).filter(Boolean);
+      const localOrders = await Order.find({ platform: 'shipmaxx', awb_code: { $in: awbs } })
+        .select('awb_code department billing_phone billing_customer_name')
+        .lean();
+      const localMap = new Map();
+      localOrders.forEach(o => { if (o.awb_code) localMap.set(o.awb_code, o); });
+
+      const formatted = rawShipments.map(s => {
+        const awb = s.awb || s.awb_code;
+        const local = localMap.get(awb);
+        const cust = s.customer || {};
+        return {
+          id: s.id,
+          awb_code: awb,
+          channel_order_id: s.orderId || s.order_id || local?.order_id,
+          order_id: s.orderId || s.order_id,
+          shipment_id: s.id,
+          customer_name: cust.name || s.customer_name || local?.billing_customer_name || 'Customer',
+          customer_phone: cust.phone || s.customer_phone || local?.billing_phone || '',
+          customer_email: cust.email || s.customer_email || '',
+          courier_name: s.courier || s.courier_name || '',
+          status: s.status || s.attemptStatus || 'UNDELIVERED',
+          current_status: s.attemptStatus || s.status || 'UNDELIVERED',
+          reason: s.reason || 'Attempt Failure',
+          attempts: Number(s.attemptNumber || s.attempts_used || s.attempts || 1),
+          ndr_raised_at: s.ndrRaisedDate || s.attemptDate || s.created_at || new Date(),
+          payment_method: s.payment_method || 'COD',
+          address: cust.address || s.address || '',
+          city: cust.city || s.city || '',
+          state: cust.state || s.state || '',
+          pincode: cust.pincode || s.pincode || '',
+          department: local?.department || 'male',
+          can_retry: s.can_retry ?? true,
+          can_rto: s.can_rto ?? true,
+          can_escalate: s.can_escalate ?? true,
+          followUps: s.followUps || [],
+          raw: s
+        };
+      });
+
+      return res.json(new ApiResponse(200, { data: formatted, shipments: formatted, meta: response.meta, total: response.meta?.total || formatted.length }, 'NDR list fetched from Shipmaxx API'));
     }
   } catch (err) {
     console.warn('[ShipMaxx API NDR Fetch Failed, falling back to local DB]:', err.message);
@@ -2809,14 +2863,11 @@ export const getNdrList = catchAsync(async (req, res) => {
   // Fallback to local MongoDB NDR records
   const { from, to, page = 1, limit = 100 } = req.query;
   const match = { platform: 'shipmaxx', status: /UNDELIVERED|NDR|EXCEPTION/i };
-  if (from || to) {
-    match.status_updated_at = {};
-    if (from) match.status_updated_at.$gte = new Date(from);
-    if (to) {
-      const toDate = new Date(to);
-      toDate.setHours(23, 59, 59, 999);
-      match.status_updated_at.$lte = toDate;
-    }
+  if (from && to) {
+    match.status_updated_at = {
+      $gte: new Date(from + 'T00:00:00.000+05:30'),
+      $lte: new Date(to + 'T23:59:59.999+05:30')
+    };
   }
 
   const orders = await Order.find(match)
@@ -2826,33 +2877,53 @@ export const getNdrList = catchAsync(async (req, res) => {
     .lean();
 
   const formatted = orders.map(o => ({
+    id: o._id,
     awb_code: o.awb_code,
     channel_order_id: o.order_id,
     order_id: o.order_id,
     shipment_id: o._id,
-    customer_name: o.billing_customer_name,
-    customer_phone: o.billing_phone,
-    courier_name: o.courier_name,
+    customer_name: o.billing_customer_name || 'Customer',
+    customer_phone: o.billing_phone || '',
+    courier_name: o.courier_name || '',
     status: o.status,
+    current_status: o.status,
     reason: o.comments?.[0]?.text || 'Undelivered Attempt Failure',
-    attempts: o.status?.includes('1ST') ? 1 : o.status?.includes('2ND') ? 2 : o.status?.includes('3RD') ? 3 : 1,
+    attempts: o.delivery_attempt || 1,
     ndr_raised_at: o.status_updated_at || o.createdAt,
-    payment_method: o.payment_method,
-    address: o.billing_address,
-    pincode: o.billing_pincode
+    payment_method: o.payment_method || 'COD',
+    address: o.billing_address || '',
+    city: o.billing_city || '',
+    state: o.billing_state || '',
+    pincode: o.billing_pincode || '',
+    department: o.department || 'male',
+    can_retry: true,
+    can_rto: true,
+    can_escalate: true
   }));
 
-  res.json(new ApiResponse(200, { data: formatted, total: formatted.length }, 'NDR list fetched from database'));
+  res.json(new ApiResponse(200, { data: formatted, shipments: formatted, total: formatted.length }, 'NDR list fetched from database'));
 });
 
 export const ndrAction = catchAsync(async (req, res) => {
-  const ndr_id = req.params.ndr_id || req.body.ndr_id || req.body.awb;
+  let ndr_id = req.params.ndr_id || req.body.ndr_id || req.body.awb;
   const { action, notes } = req.body;
   if (!ndr_id) {
     return res.status(400).json(new ApiResponse(400, null, 'ndr_id or awb is required'));
   }
   if (!action) {
     return res.status(400).json(new ApiResponse(400, null, 'action is required'));
+  }
+
+  // If ndr_id passed is an AWB or channel order ID, resolve to ShipMaxx NDR record ID
+  try {
+    const response = await smx.getNdrList();
+    const shipments = response?.shipments || [];
+    const matched = shipments.find(s => s.awb === String(ndr_id) || s.orderId === String(ndr_id) || s.id === String(ndr_id));
+    if (matched && matched.id) {
+      ndr_id = matched.id;
+    }
+  } catch (e) {
+    // Continue with original ndr_id
   }
 
   // Call external Losung API
@@ -2919,6 +2990,48 @@ export const ndrBulkAction = catchAsync(async (req, res) => {
   }
 
   res.json(new ApiResponse(200, response, 'Bulk NDR action submitted successfully'));
+});
+
+// ── Bulk Download Manifest (Module 6) ─────────────────────────────────────────
+export const downloadBulkManifest = catchAsync(async (req, res) => {
+  const { identifiers } = req.body;
+  if (!identifiers || !Array.isArray(identifiers) || identifiers.length === 0) {
+    return res.status(400).json(new ApiResponse(400, null, 'identifiers is required and must be an array of AWB numbers (1 to 100)'));
+  }
+  const buffer = await smx.downloadBulkManifestPdf(identifiers);
+  if (!buffer || buffer.length === 0) {
+    return res.status(400).json(new ApiResponse(400, null, 'Bulk manifest PDF not available'));
+  }
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="bulk-manifest-${Date.now()}.pdf"`);
+  res.send(buffer);
+});
+
+// ── Weight Disputes (Module 8) ────────────────────────────────────────────────
+export const getWeightDisputes = catchAsync(async (req, res) => {
+  const data = await smx.getWeightDisputes(req.query);
+  res.json(new ApiResponse(200, data, 'Weight disputes fetched'));
+});
+
+export const getWeightDisputeHistory = catchAsync(async (req, res) => {
+  const { dispute_id } = req.params;
+  if (!dispute_id) return res.status(400).json(new ApiResponse(400, null, 'dispute_id is required'));
+  const data = await smx.getWeightDisputeHistory(dispute_id);
+  res.json(new ApiResponse(200, data, 'Weight dispute history fetched'));
+});
+
+export const acceptWeightDispute = catchAsync(async (req, res) => {
+  const { dispute_id } = req.params;
+  if (!dispute_id) return res.status(400).json(new ApiResponse(400, null, 'dispute_id is required'));
+  const data = await smx.acceptWeightDispute(dispute_id);
+  res.json(new ApiResponse(200, data, 'Weight dispute accepted'));
+});
+
+export const rejectWeightDispute = catchAsync(async (req, res) => {
+  const { dispute_id } = req.params;
+  if (!dispute_id) return res.status(400).json(new ApiResponse(400, null, 'dispute_id is required'));
+  const data = await smx.rejectWeightDispute(dispute_id, req.body);
+  res.json(new ApiResponse(200, data, 'Weight dispute challenged'));
 });
 
 // ── NDR Notes (DB) ────────────────────────────────────────────────────────────
@@ -3024,7 +3137,6 @@ export const deleteNdrNote = catchAsync(async (req, res) => {
 
 export const backfillDepartments = catchAsync(async (req, res) => {
   const { ShipmaxxOrder } = await import('./models/shipmaxxOrder.model.js');
-  const { Order: ShiprocketOrder } = await import('../shiprocket/models/order.model.js');
   const Lead = (await import('../lead/lead.model.js')).default;
   const User = (await import('../user/user.model.js')).default;
 
@@ -3091,47 +3203,7 @@ export const backfillDepartments = catchAsync(async (req, res) => {
     await ShipmaxxOrder.bulkWrite(smxBulk);
   }
 
-  // 4. Bulk update ShiprocketOrders
-  const srOrders = await ShiprocketOrder.find({}).select('_id lead_id created_by verified_by task_created_by billing_phone department order_items').lean();
-  const srBulk = [];
-  let srUpdated = 0;
-  let srReset = 0;
-
-  for (const o of srOrders) {
-    let dept = null;
-    if (o.lead_id && leadDeptMap.has(String(o.lead_id))) {
-      dept = leadDeptMap.get(String(o.lead_id));
-    } else {
-      const uId = o.verified_by || o.created_by || o.task_created_by;
-      if (uId && userDeptMap.has(String(uId))) {
-        dept = userDeptMap.get(String(uId));
-      } else if (o.billing_phone) {
-        const p = String(o.billing_phone).replace(/\D/g, '').slice(-10);
-        if (p.length === 10 && phoneDeptMap.has(p)) {
-          dept = phoneDeptMap.get(p);
-        }
-      }
-    }
-
-    if (!dept) {
-      const prodStr = (o.order_items || []).map(p => (p.name || '').toLowerCase()).join(' ');
-      if (prodStr.includes('ortho')) dept = 'ortho';
-      else if (prodStr.includes('skin')) dept = 'skin';
-      else dept = 'male';
-    }
-
-    if (dept !== o.department) {
-      srBulk.push({
-        updateOne: {
-          filter: { _id: o._id },
-          update: { $set: { department: dept } }
-        }
-      });
-      if (dept) srUpdated++; else srReset++;
-    }
-  }
-
-  res.json(new ApiResponse(200, { smxUpdated, smxReset, srUpdated, srReset, smxTotalOps: smxBulk.length, srTotalOps: srBulk.length }, 'Department backfill completed instantly'));
+  res.json(new ApiResponse(200, { smxUpdated, smxReset, smxTotalOps: smxBulk.length }, 'Department backfill completed instantly'));
 });
 
 export const deleteShipmaxxOrder = catchAsync(async (req, res) => {
@@ -3144,7 +3216,7 @@ export const deleteShipmaxxOrder = catchAsync(async (req, res) => {
   await InTransitOrder.deleteMany(query);
   await DeliveredOrder.deleteMany(query);
   await RTOOrder.deleteMany(query);
-  await ShiprocketReturn.deleteMany(query);
+  await ShipmaxxReturn.deleteMany(query);
   await Followup.deleteMany(query);
 
   res.json(new ApiResponse(200, null, 'Shipmaxx record permanently deleted from database'));
@@ -3188,6 +3260,7 @@ export const autoDistributeFollowups = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { totalDistributed: count, staffCount: staffUsers.length }, `Successfully distributed ${count} follow-ups among ${staffUsers.length} staff members`));
 });
 
-
-
-
+export const nextOrderId = catchAsync(async (req, res) => {
+  const order_id = await peekNextOrderId();
+  res.json(new ApiResponse(200, { order_id }, 'Next order ID'));
+});

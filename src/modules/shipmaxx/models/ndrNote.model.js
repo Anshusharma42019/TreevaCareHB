@@ -6,8 +6,9 @@ const ndrNoteSchema = new mongoose.Schema({
   reason: { type: String, required: true },
   awb_number: { type: String, required: true },
   price: { type: Number, default: null },
-  source: { type: String, enum: ['shiprocket', 'shipmaxx'], default: 'shiprocket' },
+  source: { type: String, default: 'shipmaxx' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
-export const NdrNote = mongoose.model('NdrNote', ndrNoteSchema);
+export const NdrNote = mongoose.models.NdrNote || mongoose.model('NdrNote', ndrNoteSchema);
+export default NdrNote;

@@ -17,7 +17,7 @@ export const setPassword = catchAsync(async (req, res) => {
 });
 
 // In-memory shipping provider setting (persists per server instance)
-let activeShippingProvider = 'shiprocket'; // default
+let activeShippingProvider = 'shipmaxx'; // default
 
 export const getShippingProvider = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { provider: activeShippingProvider }, 'OK'));
@@ -25,7 +25,7 @@ export const getShippingProvider = catchAsync(async (req, res) => {
 
 export const setShippingProvider = catchAsync(async (req, res) => {
   const { provider } = req.body;
-  if (!['shiprocket', 'shipmaxx'].includes(provider))
+  if (!['shipmaxx'].includes(provider))
     return res.json(new ApiResponse(400, null, 'Invalid provider'));
   activeShippingProvider = provider;
   res.json(new ApiResponse(200, { provider }, 'Shipping provider updated'));

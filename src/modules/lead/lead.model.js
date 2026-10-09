@@ -57,7 +57,7 @@ const leadSchema = new mongoose.Schema(
     isDeleted: { type: Boolean, default: false },
     deletedAt: { type: Date },
     // Tracks if this lead was sent to re-verification from follow-up cycle
-    pending_reorder_source: { type: mongoose.Schema.Types.ObjectId, ref: 'ShiprocketOrder', default: null },
+    pending_reorder_source: { type: mongoose.Schema.Types.ObjectId, ref: 'ShipmaxxOrder', default: null },
     pending_reorder_staff: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     department: {
       type: String,

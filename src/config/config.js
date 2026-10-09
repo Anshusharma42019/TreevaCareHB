@@ -24,9 +24,6 @@ const envVarsSchema = z.object({
   SHIPMAXX_EMAIL: z.string().optional().default(''),
   SHIPMAXX_PASSWORD: z.string().optional().default(''),
   SHIPMAXX_API_KEY: z.string().optional().default(''),
-  SHIPROCKET_BASE_URL: z.string().optional().default('https://apiv2.shiprocket.in/v1/external'),
-  SHIPROCKET_EMAIL: z.string().optional().default(''),
-  SHIPROCKET_PASSWORD: z.string().optional().default(''),
   BULK_WHATSAPP_RATE_LIMIT: z.string().transform(Number).optional().default('20'),
 });
 
@@ -70,11 +67,6 @@ export const config = {
     email: envVars.data.SHIPMAXX_EMAIL,
     password: envVars.data.SHIPMAXX_PASSWORD,
     apiKey: envVars.data.SHIPMAXX_API_KEY,
-  },
-  shiprocket: {
-    baseUrl: envVars.data.SHIPROCKET_BASE_URL,
-    email: envVars.data.SHIPROCKET_EMAIL,
-    password: envVars.data.SHIPROCKET_PASSWORD,
   },
   whatsapp: {
     bulkRateLimit: envVars.data.BULK_WHATSAPP_RATE_LIMIT,

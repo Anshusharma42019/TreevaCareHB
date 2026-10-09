@@ -1,7 +1,7 @@
 import express from 'express';
 import auth from '../../middleware/auth.js';
 import * as c from './commission.controller.js';
-import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
+import { generateReorderCommissions } from './commissionRecord.service.js';
 
 const router = express.Router();
 
@@ -15,10 +15,9 @@ router.get('/debug/count-commissions', async (req, res) => {
   const OrderChain        = (await import('./orderChain.model.js')).default;
   const AuditLog          = (await import('./auditLog.model.js')).default;
 
-  const [count, smCount, srCount, settingsCount, chainCount, recordCount, auditCount] = await Promise.all([
+  const [count, smCount, settingsCount, chainCount, recordCount, auditCount] = await Promise.all([
     ReorderCommission.countDocuments(),
     ReorderCommission.countDocuments({ order_model: 'ShipmaxxOrder' }),
-    ReorderCommission.countDocuments({ order_model: 'ShiprocketOrder' }),
     FollowupCommissionSettings.countDocuments(),
     OrderChain.countDocuments(),
     CommissionRecord.countDocuments(),
@@ -26,7 +25,7 @@ router.get('/debug/count-commissions', async (req, res) => {
   ]);
 
   res.json({
-    legacy: { total: count, shiprocket: srCount, shipmaxx: smCount },
+    legacy: { total: count, shipmaxx: smCount },
     new:    { orderChainEntries: chainCount, commissionRecords: recordCount, auditLogs: auditCount },
     settingsCount,
   });
@@ -37,19 +36,13 @@ router.get('/debug/clean', async (req, res) => {
     const ReorderCommission = (await import('./reorderCommission.model.js')).default;
     await ReorderCommission.deleteMany({});
     
-    const Order = (await import('../shiprocket/models/order.model.js')).Order;
     const ShipmaxxOrder = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
     
-    await Order.updateMany(
-      { status: { $in: ['DELIVERED', 'Delivered', 'delivered'] } },
-      { $set: { reorder_commission_generated: false } }
-    );
     await ShipmaxxOrder.updateMany(
       { status: { $in: ['DELIVERED', 'Delivered', 'delivered'] } },
       { $set: { reorder_commission_generated: false } }
     );
     
-    const { generateReorderCommissions } = await import('../shiprocket/shiprocket.controller.js');
     const logs = await generateReorderCommissions();
     res.json({ message: 'Cleaned and regenerated (legacy only — new system unaffected)', logs });
   } catch (err) {

@@ -46,7 +46,7 @@ import { logAction } from './auditLog.service.js';
 export const appendOrderChain = async ({
   leadId,
   orderId,
-  orderModel = 'ShiprocketOrder',
+  orderModel = 'ShipmaxxOrder',
   submitterId,
   orderType,
   orderSubTotal = 0,

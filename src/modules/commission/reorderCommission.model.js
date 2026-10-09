@@ -7,7 +7,7 @@ const reorderCommissionSchema = new mongoose.Schema({
   // The ORIGINAL order that completed follow-ups and was sent to verification
   source_order_id: { type: mongoose.Schema.Types.ObjectId, refPath: 'order_model' },
   // The model for dynamic population
-  order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShiprocketOrder' },
+  order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShipmaxxOrder' },
   // The lead linking both orders
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
   // Staff who handled the re-verification and whose order got delivered

@@ -5,7 +5,7 @@ const counterSchema = new mongoose.Schema({
   seq: { type: Number, default: 0 },
 });
 
-export const Counter = mongoose.model('Counter', counterSchema);
+export const Counter = mongoose.models.Counter || mongoose.model('Counter', counterSchema);
 
 export const getNextOrderId = async () => {
   const counter = await Counter.findByIdAndUpdate(
@@ -21,3 +21,5 @@ export const peekNextOrderId = async () => {
   const next = (counter?.seq || 0) + 1;
   return `ORD-${String(next).padStart(3, '0')}`;
 };
+
+export default Counter;

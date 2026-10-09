@@ -1,10 +1,8 @@
 import mongoose from 'mongoose';
-import { Order } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
-import { Return } from '../shiprocket/models/return.model.js';
 import { ShipmaxxRtoOrder } from '../shipmaxx/models/shipmaxxRtoOrder.model.js';
 import Verification from '../verification/verification.model.js';
-import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
+import { NdrNote } from '../shipmaxx/models/ndrNote.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import { InvoiceHistory } from './invoiceHistory.model.js';
 
@@ -119,10 +117,7 @@ async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId,
 }
 
 /* ─── Status classification — covers ALL real DB values ─────────────────────── *
- * Shiprocket codes: DELIVERED, DEL, RTO_DELIVERED, RTO, RTO_INITIATED,
- *   RTO_IN_TRANSIT, RTO_INTRANSIT, RTO_NDR, RTO_OFD, RRA, OFD,
- *   OUT_FOR_DELIVERY, UND, INT, IN_TRANSIT, NEW, SC, DEX …
- * ShipMaxx codes  : DELIVERED, DEL, RTO_DELIVERED, RTO_INTRANSIT,
+ * Status codes   : DELIVERED, DEL, RTO_DELIVERED, RTO_INTRANSIT,
  *   OUT_FOR_DELIVERY, UNDELIVERED, UNDELIVERED_1ST_ATTEMPT, IN_TRANSIT …
  */
 function classifyStatus(s = '') {
@@ -175,11 +170,7 @@ async function fetchOrderStats(filter) {
     { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'created_by', select: 'role' }
   ];
-  const [sr, sm] = await Promise.all([
-    Order.find(filter, proj).populate(populates).lean(),
-    ShipmaxxOrder.find(filter, proj).populate(populates).lean(),
-  ]);
-  const all = [...sr, ...sm].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  const all = await ShipmaxxOrder.find(filter, proj).populate(populates).sort({ createdAt: -1 }).lean();
   
   const seen = new Set();
   const deduped = [];
@@ -305,15 +296,13 @@ async function getLeadLookup() {
 
 async function autoLinkOrders() {
   try {
-    const unlinkedSr = await Order.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
     const unlinkedSm = await ShipmaxxOrder.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
-    if (!unlinkedSr && !unlinkedSm) return; // nothing to do
+    if (!unlinkedSm) return; // nothing to do
 
     await import('../task/task.model.js');
     const { allLeads, byPhone, byName, byPin } = await getLeadLookup();
 
     const models = [
-      { name: 'Shiprocket Order', model: Order },
       { name: 'Shipmaxx Order',   model: ShipmaxxOrder }
     ];
 
@@ -499,10 +488,8 @@ export async function getKPIs(params) {
   // backlogActiveFilter: old orders still in transit/NDR that had activity this period
   const backlogActiveFilter = { $and: [ backlogFilter, { status: { $nin: ['DELIVERED', 'DEL'] }, status_updated_at: { $gte: start, $lte: end } } ] };
 
-  const [blActSr, blActSm, blDelSr, blDelSm] = await Promise.all([
-    Order.find(backlogActiveFilter, projBl).populate(populates).lean(),
+  const [blActSm, blDelSm] = await Promise.all([
     ShipmaxxOrder.find(backlogActiveFilter, projBl).populate(populates).lean(),
-    Order.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
     ShipmaxxOrder.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
   ]);
 
@@ -516,8 +503,8 @@ export async function getKPIs(params) {
     return res;
   };
 
-  const backlogOrders = dedup([...blActSr, ...blActSm]);
-  const backlogDeliveredOrders = dedup([...blDelSr, ...blDelSm]);
+  const backlogOrders = dedup(blActSm);
+  const backlogDeliveredOrders = dedup(blDelSm);
 
   const curr = calcKPIs(orders, start);
   const prev = calcKPIs(prevOrders, ps);
@@ -590,13 +577,10 @@ export async function getTrend(params) {
   const staffScope = await getStaffScope(staffId);
   const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
 
-  const [sr, sm] = await Promise.all([
-    Order.find(filter, { status: 1, createdAt: 1 }).lean(),
-    ShipmaxxOrder.find(filter, { status: 1, createdAt: 1 }).lean(),
-  ]);
+  const sm = await ShipmaxxOrder.find(filter, { status: 1, createdAt: 1 }).lean();
 
   const byDay = {};
-  for (const o of [...sr, ...sm]) {
+  for (const o of sm) {
     const key = new Date(o.createdAt).toISOString().slice(0, 10);
     if (!byDay[key]) byDay[key] = { delivered: 0, ofd: 0, undelivered: 0, rto: 0, rtoIntersite: 0 };
     const cat = classifyStatus(o.status);
@@ -660,10 +644,8 @@ export async function getRtoReasons(params) {
     f.$or = orClauses;
   }
 
-  const [srReturns, smRto, srOrdersRto, smOrdersRto] = await Promise.all([
-    Return.find({ ...f, return_reason: { $exists: true, $ne: '' } }, { return_reason: 1 }).lean(),
+  const [smRto, smOrdersRto] = await Promise.all([
     ShipmaxxRtoOrder.find({ ...f, problem: { $exists: true, $ne: '' } }, { problem: 1 }).lean(),
-    Order.find({ ...f, status: { $regex: 'RTO', $options: 'i' } }, { status: 1 }).lean(),
     ShipmaxxOrder.find({ ...f, status: { $regex: 'RTO', $options: 'i' } }, { status: 1 }).lean(),
   ]);
 
@@ -678,7 +660,6 @@ export async function getRtoReasons(params) {
   };
 
   const map = {};
-  for (const r of srReturns) { const k = normalize(r.return_reason); map[k] = (map[k] || 0) + 1; }
   for (const r of smRto)     { const k = normalize(r.problem);        map[k] = (map[k] || 0) + 1; }
 
   // If explicit return reason records were 0, normalize status of RTO orders
@@ -726,20 +707,17 @@ export async function getAging(params) {
   const undFilter = { ...base, status: { $regex: '^undelivered|^ndr',        $options: 'i' }, delivery_attempt: { $gte: 3 } };
   const rtoFilter = { ...base, status: { $regex: 'rto.?in.?transit|rto.?intersite', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 5 * 86400000) } };
 
-  const [ofdSR, ofdSM, undSR, undSM, rtoSR, rtoSM] = await Promise.all([
-    Order.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
+  const [ofdSM, undSM, rtoSM] = await Promise.all([
     ShipmaxxOrder.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
-    Order.find(undFilter, proj).populate(populates).sort({ delivery_attempt: -1 }).limit(150).lean(),
     ShipmaxxOrder.find(undFilter, proj).populate(populates).sort({ delivery_attempt: -1 }).limit(150).lean(),
-    Order.find(rtoFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
     ShipmaxxOrder.find(rtoFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
   ]);
 
   const tag = (arr, plat) => arr.map(o => ({ ...o, platform: o.platform || plat }));
   return {
-    ofd_stuck:           [...tag(ofdSR, 'shiprocket'), ...tag(ofdSM, 'shipmaxx')],
-    undelivered_3plus:   [...tag(undSR, 'shiprocket'), ...tag(undSM, 'shipmaxx')],
-    rto_intersite_stuck: [...tag(rtoSR, 'shiprocket'), ...tag(rtoSM, 'shipmaxx')],
+    ofd_stuck:           tag(ofdSM, 'shipmaxx'),
+    undelivered_3plus:   tag(undSM, 'shipmaxx'),
+    rto_intersite_stuck: tag(rtoSM, 'shipmaxx'),
   };
 }
 
@@ -765,13 +743,10 @@ export async function getLeaderboard(params) {
     baseMatch.$or = orClauses;
   }
 
-  const [sr, sm] = await Promise.all([
-    Order.find(baseMatch, { courier_name: 1, status: 1, delivered_at: 1, createdAt: 1 }).lean(),
-    ShipmaxxOrder.find(baseMatch, { courier_name: 1, status: 1, delivered_at: 1, createdAt: 1 }).lean(),
-  ]);
+  const sm = await ShipmaxxOrder.find(baseMatch, { courier_name: 1, status: 1, delivered_at: 1, createdAt: 1 }).lean();
 
   const map = {};
-  for (const o of [...sr, ...sm]) {
+  for (const o of sm) {
     const key = (o.courier_name || 'Unknown').trim();
     if (!map[key]) map[key] = { courier: key, total: 0, delivered: 0, rto: 0, undelivered: 0, totalTat: 0, tatCount: 0 };
     map[key].total++;
@@ -1016,19 +991,9 @@ export async function getShipments(params) {
     combined = verOrders;
   } else {
     const sortField = ['interaktReplies', 'reply_reattempt', 'reply_dawa'].includes(status) ? 'interakt_reply_at' : ((status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt');
-    let srOrders = [];
-    let smOrders = [];
-    if (!platform || platform === 'shiprocket') {
-      srOrders = await Order.find(baseFilter, proj).populate(populates).lean();
-    }
-    if (!platform || platform === 'shipmaxx') {
-      smOrders = await ShipmaxxOrder.find(baseFilter, proj).populate(populates).lean();
-    }
+    const smOrders = await ShipmaxxOrder.find(baseFilter, proj).populate(populates).lean();
 
-    const all = [
-      ...srOrders.map(o => ({ ...o, platform: 'shiprocket' })),
-      ...smOrders.map(o => ({ ...o, platform: 'shipmaxx' })),
-    ].sort((a, b) => {
+    const all = smOrders.map(o => ({ ...o, platform: 'shipmaxx' })).sort((a, b) => {
       const dateA = a[sortField] ? new Date(a[sortField]) : new Date(0);
       const dateB = b[sortField] ? new Date(b[sortField]) : new Date(0);
       return dateB - dateA;
@@ -1076,8 +1041,7 @@ export async function getAlerts(params) {
 
   const slaCutoff = new Date(Date.now() - SLA_DAYS * 86400000);
   const slaF = { ...filter, createdAt: { $lte: slaCutoff }, status: { $not: { $regex: '^delivered$', $options: 'i' } } };
-  const [srSla, smSla] = await Promise.all([Order.countDocuments(slaF), ShipmaxxOrder.countDocuments(slaF)]);
-  const slaBreach = srSla + smSla;
+  const slaBreach = await ShipmaxxOrder.countDocuments(slaF);
   if (slaBreach > 0) alerts.push({ type: 'sla_breach', severity: slaBreach > 50 ? 'critical' : 'medium', message: `${slaBreach} shipment${slaBreach > 1 ? 's' : ''} exceeded the ${SLA_DAYS}-day SLA`, value: slaBreach });
 
   const currentRtoRate = kpis.total > 0 ? +(((kpis.rto + kpis.rtoIntersite) / kpis.total) * 100).toFixed(1) : 0;
@@ -1092,23 +1056,13 @@ export async function submitRtoVerification({ order_id, platform, action }) {
     throw new Error('Order ID and action are required');
   }
   
-  if (platform === 'shipmaxx') {
-    const order = await ShipmaxxOrder.findOneAndUpdate(
-      { order_id },
-      { $set: { rto_verification_action: action } },
-      { returnDocument: 'after' }
-    );
-    if (!order) throw new Error('Shipmaxx order not found');
-    return order;
-  } else {
-    const order = await Order.findOneAndUpdate(
-      { order_id },
-      { $set: { rto_verification_action: action } },
-      { returnDocument: 'after' }
-    );
-    if (!order) throw new Error('Shiprocket order not found');
-    return order;
-  }
+  const order = await ShipmaxxOrder.findOneAndUpdate(
+    { order_id },
+    { $set: { rto_verification_action: action } },
+    { returnDocument: 'after' }
+  );
+  if (!order) throw new Error('Shipmaxx order not found');
+  return order;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

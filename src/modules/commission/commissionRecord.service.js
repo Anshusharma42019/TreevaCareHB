@@ -269,3 +269,7 @@ export const createReversal = async ({ commissionId, actor, note = '' }) => {
 
   return reversal;
 };
+
+export const generateReorderCommissions = async () => {
+  return ['[Commission] generateReorderCommissions is deprecated. Handled via orderChain.service.js.'];
+};

@@ -9,6 +9,8 @@ import * as leadService from '../lead/lead.service.js';
 
 const router = express.Router();
 
+router.get('/next-order-id', auth(), c.nextOrderId);
+
 // ── Debug ─────────────────────────────────────────────────────────────────────
 router.get('/debug/schema', async (req, res) => {
   const Followup = (await import('./models/shipmaxxFollowup.model.js')).ShipmaxxFollowup;
@@ -173,7 +175,7 @@ router.get('/debug/backfill-leads', catchAsync(async (req, res) => {
   }
   
   // Also run reorder commissions generation for Shipmaxx orders
-  const { generateReorderCommissions } = await import('../shiprocket/shiprocket.controller.js');
+  const { generateReorderCommissions } = await import('../commission/commissionRecord.service.js');
   await generateReorderCommissions();
 
   res.json({ totalUnlinkedFound: unlinked.length, successfullyLinked: updated, reorderCommissionsGenerated: true });
@@ -224,7 +226,7 @@ router.get('/debug/dump-reorders', catchAsync(async (req, res) => {
     ]
   }).select('_id source_order_id lead_id created_by order_id').lean();
 
-  res.json({ shiprocketCount: srOrders.length, items: srOrders });
+  res.json({ deliveredCount: srOrders.length, items: srOrders });
 }));
 
 router.get('/debug/sync', c.debugSync);
@@ -406,8 +408,12 @@ router.post('/warehouses/create', auth(), c.createWarehouse);
 
 // ── Invoice ───────────────────────────────────────────────────────────────────
 router.get('/invoice/:order_id', auth(), c.getInvoice);
+router.get('/invoice/order/:order_id', auth(), c.getInvoice);
 
-// ── NDR & NDR Notes ───────────────────────────────────────────────────────────
+// ── Bulk Download (Module 6) ──────────────────────────────────────────────────
+router.post('/bulk-download/manifest', auth(), c.downloadBulkManifest);
+
+// ── NDR & NDR Notes (Module 7) ────────────────────────────────────────────────
 router.get('/ndr', auth(), c.getNdrList);
 router.post('/ndr/action', auth(), c.ndrAction);
 router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);
@@ -417,6 +423,12 @@ router.get('/ndr/notes', auth(), c.getNdrNotes);
 router.post('/ndr/notes', auth(), c.createNdrNote);
 router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
 router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
+
+// ── Weight Disputes (Module 8) ────────────────────────────────────────────────
+router.get('/weight-disputes', auth(), c.getWeightDisputes);
+router.get('/weight-disputes/:dispute_id/history', auth(), c.getWeightDisputeHistory);
+router.post('/weight-disputes/:dispute_id/accept', auth(), c.acceptWeightDispute);
+router.post('/weight-disputes/:dispute_id/reject', auth(), c.rejectWeightDispute);
 
 // Admin-only permanent order deletion
 router.delete('/orders/:id', auth(), c.deleteShipmaxxOrder);
