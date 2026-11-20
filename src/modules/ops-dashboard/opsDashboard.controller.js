@@ -5,10 +5,21 @@ import * as svc from './opsDashboard.service.js';
 const OVERALL_ROLES = ['admin', 'manager'];
 
 function extractParams(req) {
-  const isOverall = OVERALL_ROLES.includes(req.user?.role) && req.query.my_data_only !== 'true';
-  // Admin/Manager → see department data (staffId = null) unless my_data_only is requested
+  const userRole = (req.user?.role || '').toLowerCase();
+  const isAdminOrManager = OVERALL_ROLES.includes(userRole);
+
+  // Admin & Manager can toggle between all data and their own data.
+  // Regular staff (sales, support, staff) are strictly locked to their own data only.
+  let isOverall = false;
+  if (isAdminOrManager) {
+    const requestedMy = req.query.scope === 'my' || req.query.view === 'my' || req.query.my_data_only === 'true';
+    isOverall = !requestedMy;
+  } else {
+    isOverall = false; // staff strictly restricted to their own data
+  }
+
   const staffId = isOverall ? null : String(req.user?._id);
-  const department = req.query.department || req.user?.departments?.[0] || req.user?.department || null;
+  const department = req.query.department || null;
 
   return {
     preset:       req.query.preset    || 'mtd',

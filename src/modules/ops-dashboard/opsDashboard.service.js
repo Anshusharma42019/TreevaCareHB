@@ -40,23 +40,60 @@ function buildPrevRange(start, end) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
-   Staff scoping: find all lead_ids that a staff member verified
-   Orders are linked to staff via: Verification.assignedTo → Verification.lead → Order.lead_id
-   Also covers orders where created_by / verified_by is set directly
+   Staff scoping: find all lead_ids & phone numbers that a staff member handled
+   Orders are linked to staff via: Verification, Lead, Task, CallAgain, Cnp
+   Also covers orders where created_by / verified_by / task_created_by is set directly
 ══════════════════════════════════════════════════════════════════════════════ */
 async function getStaffScope(staffId) {
   if (!staffId) return null; // null = no scope (admin/manager)
   const id = new mongoose.Types.ObjectId(staffId);
-  const verifications = await mongoose.model('Verification').find({ $or: [{ verifiedBy: id }, { assignedTo: id }] }, { lead: 1, _id: 1 }).lean();
-  const leads = await mongoose.model('Lead').find({ assignedTo: id }, { _id: 1 }).lean();
+  const [verifications, leads, tasks, callAgains, cnps] = await Promise.all([
+    mongoose.model('Verification').find({ $or: [{ verifiedBy: id }, { assignedTo: id }, { createdBy: id }] }, { lead: 1, _id: 1, phone: 1 }).lean().catch(() => []),
+    mongoose.model('Lead').find({ $or: [{ assignedTo: id }, { createdBy: id }, { verifiedBy: id }] }, { _id: 1, phone: 1 }).lean().catch(() => []),
+    mongoose.model('Task').find({ $or: [{ assignedTo: id }, { createdBy: id }] }, { _id: 1, lead: 1 }).lean().catch(() => []),
+    mongoose.model('CallAgain').find({ $or: [{ assignedTo: id }, { createdBy: id }] }, { _id: 1, lead: 1 }).lean().catch(() => []),
+    mongoose.model('Cnp').find({ $or: [{ assignedTo: id }, { createdBy: id }] }, { _id: 1, lead: 1 }).lean().catch(() => [])
+  ]);
 
   const leadIdsSet = new Set();
-  verifications.forEach(v => { if (v.lead) leadIdsSet.add(String(v.lead)); });
-  leads.forEach(l => { if (l._id) leadIdsSet.add(String(l._id)); });
+  const phoneSet = new Set();
+
+  verifications.forEach(v => {
+    if (v.lead) leadIdsSet.add(String(v.lead));
+    if (v._id) leadIdsSet.add(String(v._id));
+    if (v.phone) {
+      const p = String(v.phone).replace(/\D/g, '').slice(-10);
+      if (p.length === 10) phoneSet.add(p);
+    }
+  });
+
+  leads.forEach(l => {
+    if (l._id) leadIdsSet.add(String(l._id));
+    if (l.phone) {
+      const p = String(l.phone).replace(/\D/g, '').slice(-10);
+      if (p.length === 10) phoneSet.add(p);
+    }
+  });
+
+  tasks.forEach(t => {
+    if (t.lead) leadIdsSet.add(String(t.lead));
+    if (t._id) leadIdsSet.add(String(t._id));
+  });
+
+  callAgains.forEach(c => {
+    if (c.lead) leadIdsSet.add(String(c.lead));
+    if (c._id) leadIdsSet.add(String(c._id));
+  });
+
+  cnps.forEach(c => {
+    if (c.lead) leadIdsSet.add(String(c.lead));
+    if (c._id) leadIdsSet.add(String(c._id));
+  });
 
   return {
     leadIds: Array.from(leadIdsSet).map(idStr => new mongoose.Types.ObjectId(idStr)),
-    verificationIds: verifications.map(v => v._id).filter(Boolean)
+    verificationIds: verifications.map(v => v._id).filter(Boolean),
+    phones: Array.from(phoneSet)
   };
 }
 
@@ -65,8 +102,6 @@ async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId,
   const f = { createdAt: { $gte: start, $lte: end } };
   if (department && department !== 'all') {
     f.department = String(department).toLowerCase();
-  } else {
-    f.department = { $in: ['male', 'ortho', 'skin'] };
   }
   f['order_items.name'] = { $not: /migraine|piles/i };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
@@ -77,39 +112,46 @@ async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId,
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
 
-  // Staff scoping: match orders via lead_id (primary), or created_by / verified_by (fallback)
+  // Staff scoping: match orders strictly handled by this staff
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
     
     // Find AWBs for any NDR notes created by this user
-    const ndrNotes = await mongoose.model('NdrNote').find({ createdBy: id }).select('awb_number').lean();
-    const ndrAwbs = ndrNotes.map(n => n.awb_number).filter(Boolean);
+    let ndrAwbs = [];
+    try {
+      const ndrNotes = await mongoose.model('NdrNote').find({ createdBy: id }).select('awb_number').lean();
+      ndrAwbs = ndrNotes.map(n => n.awb_number).filter(Boolean);
+    } catch (e) {}
 
     // Find Orders for any Followups assigned to this user
-    const [srF, smF] = await Promise.all([
-      mongoose.model('Followup').find({ staff: id }).select('order_id').lean(),
-      mongoose.model('ShipmaxxFollowup').find({ staff: id }).select('order_id').lean()
-    ]);
-    const followupOrderIds = [...srF.map(f => f.order_id), ...smF.map(f => f.order_id)].filter(Boolean);
+    let followupOrderIds = [];
+    try {
+      const smF = await mongoose.model('ShipmaxxFollowup').find({ staff: id }).select('order_id').lean();
+      followupOrderIds = smF.map(f => f.order_id).filter(Boolean);
+    } catch (e) {}
 
     const orClauses = [
       { created_by: id },
-      { verified_by: id }, // Support's re-orders have verified_by: supportId, and we need them to count!
+      { verified_by: id },
+      { task_created_by: id },
       { 'comments.createdBy': id }
     ];
     
     if (staffScope?.leadIds?.length > 0) {
-      orClauses.push({ lead_id: { $in: staffScope.leadIds }, source_order_id: null });
+      orClauses.push({ lead_id: { $in: staffScope.leadIds } });
     }
     if (staffScope?.verificationIds?.length > 0) {
-      orClauses.push({ verification_id: { $in: staffScope.verificationIds }, source_order_id: null });
+      orClauses.push({ verification_id: { $in: staffScope.verificationIds } });
+    }
+    if (staffScope?.phones?.length > 0) {
+      orClauses.push({ billing_phone: { $in: staffScope.phones } });
     }
     if (ndrAwbs.length > 0) {
       orClauses.push({ awb_code: { $in: ndrAwbs } });
     }
     if (followupOrderIds.length > 0) {
       orClauses.push({ _id: { $in: followupOrderIds } });
-      orClauses.push({ order_id: { $in: followupOrderIds.map(String) } }); // For ShipmaxxOrder string order_id
+      orClauses.push({ order_id: { $in: followupOrderIds.map(String) } });
     }
     f.$or = orClauses;
   }
@@ -404,14 +446,14 @@ export async function getKPIs(params) {
   // Fire-and-forget: do NOT await so dashboard responds immediately.
   // autoLinkOrders runs in background and DB gets updated for next load.
   autoLinkOrders().catch(err => console.error('[autoLinkOrders bg]', err.message));
-  const { preset, from, to, hub, courier, awb, state, staffId } = params;
+  const { preset, from, to, hub, courier, awb, state, staffId, department } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const { start: ps, end: pe } = buildPrevRange(start, end);
 
   const staffScope = await getStaffScope(staffId);
 
-  const f    = await buildOrderFilter(start, end, { hub, courier, awb, state, staffId, staffScope });
-  const fPrv = await buildOrderFilter(ps, pe, { hub, courier, awb, state, staffId, staffScope });
+  const f    = await buildOrderFilter(start, end, { hub, courier, awb, state, staffId, staffScope, department });
+  const fPrv = await buildOrderFilter(ps, pe, { hub, courier, awb, state, staffId, staffScope, department });
 
   const verF    = { createdAt: { $gte: start, $lte: end } };
   const verFPrv = { createdAt: { $gte: ps,    $lte: pe  } };
@@ -572,10 +614,10 @@ export async function getKPIs(params) {
    2. Trend Chart
 ══════════════════════════════════════════════════════════════════════════════ */
 export async function getTrend(params) {
-  const { preset, from, to, hub, courier, state, staffId } = params;
+  const { preset, from, to, hub, courier, state, staffId, department } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
-  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
+  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope, department });
 
   const sm = await ShipmaxxOrder.find(filter, { status: 1, createdAt: 1 }).lean();
 
@@ -601,13 +643,16 @@ export async function getTrend(params) {
    3. Delivery Funnel
 ══════════════════════════════════════════════════════════════════════════════ */
 export async function getFunnel(params) {
-  const { preset, from, to, hub, courier, state, staffId } = params;
+  const { preset, from, to, hub, courier, state, staffId, department } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
-  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
+  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope, department });
 
   const verF = { createdAt: { $gte: start, $lte: end } };
-  if (staffId) verF.assignedTo = new mongoose.Types.ObjectId(staffId);
+  if (staffId) {
+    const id = new mongoose.Types.ObjectId(staffId);
+    verF.$or = [{ verifiedBy: id }, { assignedTo: id }];
+  }
 
   const [orders, verified] = await Promise.all([
     fetchOrderStats(filter),
@@ -628,17 +673,18 @@ export async function getFunnel(params) {
    4. RTO Reasons
 ══════════════════════════════════════════════════════════════════════════════ */
 export async function getRtoReasons(params) {
-  const { preset, from, to, hub, courier, state, staffId } = params;
+  const { preset, from, to, hub, courier, state, staffId, department } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
 
   const f = { createdAt: { $gte: start, $lte: end } };
+  if (department && department !== 'all') f.department = String(department).toLowerCase();
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
-    const orClauses = [{ created_by: id }, { verified_by: id }, { 'comments.createdBy': id }];
+    const orClauses = [{ created_by: id }, { verified_by: id }, { task_created_by: id }, { 'comments.createdBy': id }];
     if (staffScope?.leadIds?.length > 0) orClauses.push({ lead_id: { $in: staffScope.leadIds } });
     if (staffScope?.verificationIds?.length > 0) orClauses.push({ verification_id: { $in: staffScope.verificationIds } });
     f.$or = orClauses;
@@ -664,7 +710,6 @@ export async function getRtoReasons(params) {
 
   // If explicit return reason records were 0, normalize status of RTO orders
   if (!Object.keys(map).length) {
-    for (const r of srOrdersRto) { const k = normalize(r.status); map[k] = (map[k] || 0) + 1; }
     for (const r of smOrdersRto) { const k = normalize(r.status); map[k] = (map[k] || 0) + 1; }
   }
 
@@ -685,9 +730,9 @@ export async function getAging(params) {
   if (state)   base.billing_state   = { $regex: state,   $options: 'i' };
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
-    const orClauses = [{ created_by: id }, { verified_by: id }, { 'comments.createdBy': id }];
-    if (staffScope?.leadIds?.length > 0) orClauses.push({ lead_id: { $in: staffScope.leadIds }, source_order_id: null });
-    if (staffScope?.verificationIds?.length > 0) orClauses.push({ verification_id: { $in: staffScope.verificationIds }, source_order_id: null });
+    const orClauses = [{ created_by: id }, { verified_by: id }, { task_created_by: id }, { 'comments.createdBy': id }];
+    if (staffScope?.leadIds?.length > 0) orClauses.push({ lead_id: { $in: staffScope.leadIds } });
+    if (staffScope?.verificationIds?.length > 0) orClauses.push({ verification_id: { $in: staffScope.verificationIds } });
     base.$or = orClauses;
   }
 
@@ -737,9 +782,9 @@ export async function getLeaderboard(params) {
   if (state) baseMatch.billing_state   = { $regex: state, $options: 'i' };
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
-    const orClauses = [{ created_by: id }, { verified_by: id }, { 'comments.createdBy': id }];
-    if (staffScope?.leadIds?.length > 0) orClauses.push({ lead_id: { $in: staffScope.leadIds }, source_order_id: null });
-    if (staffScope?.verificationIds?.length > 0) orClauses.push({ verification_id: { $in: staffScope.verificationIds }, source_order_id: null });
+    const orClauses = [{ created_by: id }, { verified_by: id }, { task_created_by: id }, { 'comments.createdBy': id }];
+    if (staffScope?.leadIds?.length > 0) orClauses.push({ lead_id: { $in: staffScope.leadIds } });
+    if (staffScope?.verificationIds?.length > 0) orClauses.push({ verification_id: { $in: staffScope.verificationIds } });
     baseMatch.$or = orClauses;
   }
 
