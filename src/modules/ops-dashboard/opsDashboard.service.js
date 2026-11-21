@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import User from '../user/user.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import { ShipmaxxRtoOrder } from '../shipmaxx/models/shipmaxxRtoOrder.model.js';
 import Verification from '../verification/verification.model.js';
@@ -692,7 +693,7 @@ export async function getRtoReasons(params) {
 
   const [smRto, smOrdersRto] = await Promise.all([
     ShipmaxxRtoOrder.find({ ...f, problem: { $exists: true, $ne: '' } }, { problem: 1 }).lean(),
-    ShipmaxxOrder.find({ ...f, status: { $regex: 'RTO', $options: 'i' } }, { status: 1 }).lean(),
+    ShipmaxxOrder.find({ ...f, status: { $regex: 'RTO', $options: 'i' } }, { status: 1, rto_reason: 1, ndr_reason: 1, courier_remarks: 1 }).lean(),
   ]);
 
   const normalize = (r) => {
@@ -700,13 +701,26 @@ export async function getRtoReasons(params) {
     if (!v || v === 'n/a')                                        return 'Other';
     if (/refus|reject|cancel|not.?want/i.test(v))                return 'Customer Refused';
     if (/unreachable|no.?answer|not.?reachable|phone/i.test(v))  return 'Customer Unreachable';
-    if (/address|wrong.?add|incorrect.?add|not.?found/i.test(v)) return 'Address Issue';
+    if (/address|wrong.?add|incorrect.?add|not.?found|landmark|pincode/i.test(v)) return 'Address Issue';
+    if (/door.?lock|closed|not.?available|person.?not.?available/i.test(v)) return 'Customer Not Available / Door Locked';
+    if (/cod|cash|amount|money|payment/i.test(v))                return 'Cash / Payment Issue';
     if (/weather|flood|natural|delay/i.test(v))                  return 'Weather / Natural';
     return 'Other';
   };
 
+  const { IS_RETURN_OR_TRANSIT_NOISE } = await import('../shipmaxx/shipmaxx.controller.js');
   const map = {};
-  for (const r of smRto)     { const k = normalize(r.problem);        map[k] = (map[k] || 0) + 1; }
+  for (const r of smOrdersRto) {
+    const reasonText = r.rto_reason || r.ndr_reason || r.courier_remarks;
+    if (reasonText && !IS_RETURN_OR_TRANSIT_NOISE(reasonText)) {
+      const k = normalize(reasonText);
+      map[k] = (map[k] || 0) + 1;
+    }
+  }
+  for (const r of smRto) {
+    const k = normalize(r.problem);
+    map[k] = (map[k] || 0) + 1;
+  }
 
   // If explicit return reason records were 0, normalize status of RTO orders
   if (!Object.keys(map).length) {
@@ -719,6 +733,47 @@ export async function getRtoReasons(params) {
 /* ══════════════════════════════════════════════════════════════════════════════
    5. Aging Buckets
 ══════════════════════════════════════════════════════════════════════════════ */
+async function enrichCommentsWithUserNames(shipments) {
+  if (!Array.isArray(shipments) || shipments.length === 0) return;
+  const missingUserIds = [];
+  for (const o of shipments) {
+    for (const c of o?.comments || []) {
+      if (!c.creatorName && (!c.createdBy || typeof c.createdBy !== 'object' || !c.createdBy.name)) {
+        const uid = typeof c.createdBy === 'object' ? c.createdBy?._id : c.createdBy;
+        if (uid && mongoose.isValidObjectId(uid)) missingUserIds.push(uid);
+      }
+    }
+  }
+  if (missingUserIds.length > 0) {
+    try {
+      const foundUsers = await User.find({ _id: { $in: missingUserIds } }, 'name role').lean();
+      const userMap = new Map(foundUsers.map(u => [String(u._id), u]));
+      for (const o of shipments) {
+        for (const c of o?.comments || []) {
+          const uid = String(typeof c.createdBy === 'object' ? (c.createdBy?._id || '') : (c.createdBy || ''));
+          if (userMap.has(uid)) {
+            const u = userMap.get(uid);
+            c.createdBy = { _id: u._id, name: u.name, role: u.role };
+            c.creatorName = u.name;
+            c.creatorRole = u.role;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  for (const o of shipments) {
+    for (const c of o?.comments || []) {
+      if (c.creatorName && (!c.createdBy || typeof c.createdBy !== 'object' || !c.createdBy.name)) {
+        c.createdBy = {
+          _id: c.createdBy?._id || c.createdBy || null,
+          name: c.creatorName,
+          role: c.creatorRole || ''
+        };
+      }
+    }
+  }
+}
+
 export async function getAging(params) {
   const { hub, courier, state, staffId } = params;
   const now = new Date();
@@ -740,12 +795,14 @@ export async function getAging(params) {
     order_id: 1, awb_code: 1, billing_customer_name: 1, billing_city: 1,
     billing_state: 1, courier_name: 1, status: 1, status_updated_at: 1,
     delivery_attempt: 1, sub_total: 1, platform: 1, rto_verification_action: 1,
+    rto_reason: 1, ndr_reason: 1, courier_remarks: 1,
     problem: 1, comments: 1, notes: 1, follow_ups: 1, order_items: 1,
     billing_phone: 1, billing_address: 1, billing_pincode: 1, verification_id: 1,
   };
 
   const populates = [
-    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' },
+    { path: 'comments.createdBy', select: 'name role' }
   ];
 
   const ofdFilter = { ...base, status: { $regex: 'out.?for.?delivery|^ofd', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 2 * 86400000) } };
@@ -756,6 +813,12 @@ export async function getAging(params) {
     ShipmaxxOrder.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
     ShipmaxxOrder.find(undFilter, proj).populate(populates).sort({ delivery_attempt: -1 }).limit(150).lean(),
     ShipmaxxOrder.find(rtoFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
+  ]);
+
+  await Promise.all([
+    enrichCommentsWithUserNames(ofdSM),
+    enrichCommentsWithUserNames(undSM),
+    enrichCommentsWithUserNames(rtoSM),
   ]);
 
   const tag = (arr, plat) => arr.map(o => ({ ...o, platform: o.platform || plat }));
@@ -969,13 +1032,15 @@ export async function getShipments(params) {
     billing_city: 1, billing_state: 1, courier_name: 1, status: 1,
     status_updated_at: 1, delivery_attempt: 1, sub_total: 1, payment_method: 1,
     delivered_at: 1, createdAt: 1, platform: 1, pickup_location: 1, lead_id: 1,
-    rto_verification_action: 1, problem: 1, comments: 1, notes: 1, follow_ups: 1,
+    rto_verification_action: 1, rto_reason: 1, ndr_reason: 1, courier_remarks: 1,
+    problem: 1, comments: 1, notes: 1, follow_ups: 1,
     order_items: 1, billing_address: 1, billing_pincode: 1, verification_id: 1,
     interakt_reply_text: 1, interakt_reply_at: 1,
   };
 
   const populates = [
-    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' },
+    { path: 'comments.createdBy', select: 'name role' }
   ];
 
   let srOrders = [], smOrders = [], verOrders = [], srTotal = 0, smTotal = 0, verTotal = 0;
@@ -1057,7 +1122,69 @@ export async function getShipments(params) {
     srTotal = deduped.length; // use srTotal as the combined total for ease
     smTotal = 0;
     combined = deduped.slice(skip, skip + Number(limit));
+
+    // Enrich delivery boy / RTO reasons dynamically if missing or invalid return noise
+    try {
+      const NdrNote = (await import('../shipmaxx/models/ndrNote.model.js')).default;
+      const ShipmaxxReturn = (await import('../shipmaxx/models/shipmaxxReturn.model.js')).default;
+      const ShipmaxxRtoOrder = (await import('../shipmaxx/models/shipmaxxRtoOrder.model.js')).default;
+      const smx = (await import('../shipmaxx/shipmaxx.service.js')).default;
+      const { extractDeliveryReason, IS_RETURN_OR_TRANSIT_NOISE } = await import('../shipmaxx/shipmaxx.controller.js');
+
+      await Promise.allSettled(combined.map(async (o) => {
+        const curReason = o.rto_reason || o.ndr_reason || o.courier_remarks || '';
+        const isNoise = IS_RETURN_OR_TRANSIT_NOISE(curReason);
+        if (curReason && !isNoise) return;
+
+        const isRtoOrUndelivered = /rto|und|ndr|dex|pcn|rra|fail|reject/i.test(o.status || '');
+        if (!isRtoOrUndelivered && !status?.toLowerCase().includes('rto') && !status?.toLowerCase().includes('undelivered')) return;
+
+        let reason = '';
+        if (o.awb_code) {
+          const ndrNote = await NdrNote.findOne({ awb_number: o.awb_code }).sort({ createdAt: -1 }).lean().catch(() => null);
+          if (ndrNote?.reason && !IS_RETURN_OR_TRANSIT_NOISE(ndrNote.reason)) reason = ndrNote.reason;
+        }
+        if (!reason && (o.awb_code || o.order_id)) {
+          const ret = await ShipmaxxReturn.findOne({ $or: [{ awb_code: o.awb_code }, { order_id: o.order_id }] }).lean().catch(() => null);
+          if (ret?.return_reason && !IS_RETURN_OR_TRANSIT_NOISE(ret.return_reason)) reason = ret.return_reason;
+        }
+        if (!reason && (o.awb_code || o.order_id)) {
+          const rtoOrd = await ShipmaxxRtoOrder.findOne({ $or: [{ awb_code: o.awb_code }, { order_id: o.order_id }] }).lean().catch(() => null);
+          const rtoTxt = rtoOrd?.problem || rtoOrd?.notes || '';
+          if (rtoTxt && !IS_RETURN_OR_TRANSIT_NOISE(rtoTxt)) reason = rtoTxt;
+        }
+
+        // Live track lookup with 2.5s timeout if still missing
+        if (!reason && o.awb_code) {
+          try {
+            const trackRes = await Promise.race([
+              smx.trackShipment(o.awb_code),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+            ]);
+            const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+            reason = extractDeliveryReason(tracking);
+          } catch (_) {}
+        }
+
+        if (reason) {
+          o.rto_reason = reason;
+          o.ndr_reason = reason;
+          o.courier_remarks = reason;
+          ShipmaxxOrder.updateOne({ _id: o._id }, { $set: { rto_reason: reason, ndr_reason: reason, courier_remarks: reason } }).catch(() => {});
+        } else if (isNoise) {
+          // If no specific reason found, clear the noise
+          o.rto_reason = '';
+          o.ndr_reason = '';
+          o.courier_remarks = '';
+          ShipmaxxOrder.updateOne({ _id: o._id }, { $set: { rto_reason: '', ndr_reason: '', courier_remarks: '' } }).catch(() => {});
+        }
+      }));
+    } catch (e) {
+      console.error('[getShipments reason enrichment error]', e.message);
+    }
   }
+
+  await enrichCommentsWithUserNames(combined);
 
   const totalAll = verTotal > 0 ? verTotal : (srTotal + smTotal);
 

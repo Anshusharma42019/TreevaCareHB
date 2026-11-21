@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import mongoose from 'mongoose';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
-import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, setAutoFollowUps } from './shipmaxx.controller.js';
+import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, extractDeliveryReason, setAutoFollowUps } from './shipmaxx.controller.js';
 import { generateReorderCommissions } from '../commission/commissionRecord.service.js';
 import { Lead } from '../lead/lead.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
@@ -341,6 +341,12 @@ export const runCronSync = async () => {
             }
 
             const update = { status, status_updated_at: actualUpdatedAt, delivery_attempt: attempts };
+            const deliveryReason = extractDeliveryReason(tracking);
+            if (deliveryReason) {
+              update.rto_reason = deliveryReason;
+              update.ndr_reason = deliveryReason;
+              update.courier_remarks = deliveryReason;
+            }
             
             if (status === 'DELIVERED') {
               let actualDeliveredAt = null;

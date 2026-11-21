@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import smx from './shipmaxx.service.js';
@@ -12,6 +13,7 @@ import { Lead } from '../lead/lead.model.js';
 import { NdrNote } from './models/ndrNote.model.js';
 import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
+import User from '../user/user.model.js';
 import { getNextOrderId, peekNextOrderId } from './models/counter.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import * as leadService from '../lead/lead.service.js';
@@ -163,6 +165,90 @@ export const parseShipMaxxDate = (dateStr) => {
   return isNaN(iso.getTime()) ? null : iso;
 };
 
+export const IS_RETURN_OR_TRANSIT_NOISE = (text) => {
+  if (!text) return true;
+  const t = String(text).trim().toUpperCase();
+  if (/^(UND|DEX|NDR|RTO|RTD|RRA|OFD|OFP|INT|PKD|SPD|SPB|DEL|NEW|UNKNOWN)$/.test(t)) return true;
+  if (/RETURN ACCEPTED|RETURNED TO ORIGIN|SHIPPER'S REQUEST|SHIPPER REQUEST/i.test(t)) return true;
+  if (/DISPATCHED FOR RTO|NO CLIENT INSTRUCTIONS|BAG IN TRANSIT|ITEM ADDED TO BAG|ADDED TO BAG/i.test(t)) return true;
+  if (/SHIPMENT RECEIVED|BAG RECEIVED|TRIP ARRIVED|VEHICLE DEPARTED|VEHICLE ACCIDENT|WEIGHT CAPTURED/i.test(t)) return true;
+  if (/MANIFEST UPLOADED|SHIPMENT BOOKED|PICKUP SCHEDULED|OUT FOR PICKUP|SHIPMENT PICKED UP/i.test(t)) return true;
+  if (/SELLER INITIATED DELAY|SHIPPER UNAVAILABLE|PICKUP FAILED/i.test(t)) return true;
+  if (/CALL PLACED TO CONSIGNEE|OUT FOR DELIVERY|OUT FOR RETURN/i.test(t)) return true;
+  if (/^RTO DELIVERED|^RTO INTRANSIT|^RTO_DELIVERED|^RTO_INITIATED|^RTO_INTRANSIT/i.test(t)) return true;
+  if (/UNDELIVERED SHIPMENT HELD AT LOCATION/i.test(t)) return true;
+  return false;
+};
+
+const IS_SPECIFIC_DELIVERY_REASON = (text) => {
+  if (!text) return false;
+  return /refus|reject|cancel|not.?contactable|unreachable|unavailable|door.?lock|closed|address|incorrect|incomplete|not.?shared|otp|fake|not.?ordered|reschedule|future.?date|cash|cod|money|cost|expensive|delay|damage/i.test(text);
+};
+
+export const cleanReasonText = (str) => {
+  if (!str) return '';
+  return String(str)
+    .replace(/^RTO Pending\s*-\s*/i, '')
+    .replace(/\s*\?\s*/g, ' - ')
+    .trim();
+};
+
+export const extractDeliveryReason = (tracking) => {
+  if (!tracking) return '';
+
+  const history = tracking.history || tracking.tracking_history || [];
+  if (Array.isArray(history) && history.length > 0) {
+    const candidates = [];
+    for (const h of history) {
+      const code = String(h.system_status_code || h.status || '').toUpperCase();
+      const name = String(h.system_status_name || '').toUpperCase();
+      const desc = String(h.description || '').trim();
+      const remarks = String(h.remarks || '').trim();
+      const reason = String(h.reason || '').trim();
+
+      const texts = [remarks, reason, desc, h.system_status_name].filter(Boolean);
+      for (const rawText of texts) {
+        const text = String(rawText).trim();
+        if (!text || IS_RETURN_OR_TRANSIT_NOISE(text)) continue;
+
+        const isUndEvent = code === 'UND' || code === 'DEX' || code === 'NDR' || 
+                           name.includes('UNDELIVERED') || name.includes('DELIVERY EXCEPTION') || name.includes('ATTEMPT');
+
+        candidates.push({
+          text,
+          isUndEvent,
+          isSpecific: IS_SPECIFIC_DELIVERY_REASON(text),
+          isGenericAttemptLimit: /max(imum)? attempts|attempts reached|attempts exhausted/i.test(text),
+        });
+      }
+    }
+
+    const specificUnd = candidates.find(c => c.isUndEvent && c.isSpecific);
+    if (specificUnd) return cleanReasonText(specificUnd.text);
+
+    const anySpecific = candidates.find(c => c.isSpecific);
+    if (anySpecific) return cleanReasonText(anySpecific.text);
+
+    const anyUnd = candidates.find(c => c.isUndEvent && !c.isGenericAttemptLimit);
+    if (anyUnd) return cleanReasonText(anyUnd.text);
+
+    const genericUnd = candidates.find(c => c.isUndEvent);
+    if (genericUnd) return cleanReasonText(genericUnd.text);
+  }
+
+  const topFields = [tracking.ndr_reason, tracking.reason, tracking.courier_remarks, tracking.remarks, tracking.rto_reason, tracking.failure_reason];
+  for (const f of topFields) {
+    if (f && typeof f === 'string') {
+      const trimmed = f.trim();
+      if (trimmed && !IS_RETURN_OR_TRANSIT_NOISE(trimmed)) {
+        return cleanReasonText(trimmed);
+      }
+    }
+  }
+
+  return '';
+};
+
 export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
   if (tracking && tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
     const sortedHistory = [...tracking.history].sort((a, b) => {
@@ -215,17 +301,64 @@ export const setPassword = catchAsync(async (req, res) => {
 export const getOrder = catchAsync(async (req, res) => {
   const { order_id } = req.params;
 
-  // Try local DB first (frontend passes MongoDB _id)
-  const localOrder = await Order.findOne({
-    platform: 'shipmaxx',
-    $or: [{ _id: order_id.match(/^[a-f\d]{24}$/i) ? order_id : null }, { order_id: order_id }],
-  })
+  // Try local DB first (frontend passes MongoDB _id, order_id, or awb_code)
+  const isObjectId = mongoose.isValidObjectId(order_id) || /^[a-f\d]{24}$/i.test(String(order_id));
+  const query = {
+    $or: [
+      isObjectId ? { _id: order_id } : null,
+      { order_id: String(order_id) },
+      { awb_code: String(order_id) }
+    ].filter(Boolean)
+  };
+
+  let localOrder = await Order.findOne(query)
     .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
     .populate('comments.createdBy', 'name role')
     .lean();
 
+  if (!localOrder) {
+    try {
+      const ShipmaxxRtoOrder = (await import('./models/shipmaxxRtoOrder.model.js')).default;
+      localOrder = await ShipmaxxRtoOrder.findOne(query)
+        .populate('comments.createdBy', 'name role')
+        .lean();
+    } catch (_) {}
+  }
+
   if (localOrder) {
+    // Enrich missing user names in comments
+    const missingIds = (localOrder.comments || [])
+      .filter(c => (!c.createdBy || typeof c.createdBy !== 'object' || !c.createdBy.name) && !c.creatorName)
+      .map(c => typeof c.createdBy === 'object' ? c.createdBy?._id : c.createdBy)
+      .filter(id => id && mongoose.isValidObjectId(id));
+
+    if (missingIds.length > 0) {
+      try {
+        const foundUsers = await User.find({ _id: { $in: missingIds } }, 'name role').lean();
+        const userMap = new Map(foundUsers.map(u => [String(u._id), u]));
+        for (const c of localOrder.comments || []) {
+          const uid = String(typeof c.createdBy === 'object' ? (c.createdBy?._id || '') : (c.createdBy || ''));
+          if (userMap.has(uid)) {
+            const u = userMap.get(uid);
+            c.createdBy = { _id: u._id, name: u.name, role: u.role };
+            c.creatorName = u.name;
+            c.creatorRole = u.role;
+          }
+        }
+      } catch (_) {}
+    }
+
+    for (const c of localOrder.comments || []) {
+      if (c.creatorName && (!c.createdBy || typeof c.createdBy !== 'object' || !c.createdBy.name)) {
+        c.createdBy = {
+          _id: c.createdBy?._id || c.createdBy || null,
+          name: c.creatorName,
+          role: c.creatorRole || ''
+        };
+      }
+    }
+
     const followups = await Followup.find({ order_id: localOrder._id }).sort({ followup_number: 1 }).lean();
     return res.json(new ApiResponse(200, { ...localOrder, followups }, 'Order fetched'));
   }
@@ -1151,32 +1284,89 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
 export const saveOrderNote = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const { text, type = 'general', section = '' } = req.body;
+  const { text, type = 'general', section = '', creatorName = '', creatorRole = '' } = req.body;
   if (!text) return res.status(400).json(new ApiResponse(400, null, 'text is required'));
+
+  let authorName = creatorName;
+  let authorRole = creatorRole || req.user?.role || '';
+  try {
+    const userDoc = await User.findById(req.user._id).select('name role').lean();
+    if (userDoc) {
+      if (userDoc.name) authorName = userDoc.name;
+      if (userDoc.role) authorRole = userDoc.role;
+    }
+  } catch (_) {}
+  if (!authorName) authorName = req.user?.name || 'Staff';
 
   const comment = {
     text,
     type,
     section,
     createdBy: req.user._id,
+    creatorName: authorName,
+    creatorRole: authorRole,
     createdAt: new Date()
   };
 
+  const isObjectId = mongoose.isValidObjectId(id) || /^[a-f\d]{24}$/i.test(String(id));
+  const query = {
+    $or: [
+      isObjectId ? { _id: id } : null,
+      { order_id: String(id) },
+      { awb_code: String(id) }
+    ].filter(Boolean)
+  };
+
   let order = await Order.updateWithTransaction(
-    { _id: id, platform: 'shipmaxx' },
+    query,
     { $push: { comments: comment } },
     { returnDocument: 'after' }
   );
 
+  if (!order) {
+    try {
+      const ShipmaxxRtoOrder = (await import('./models/shipmaxxRtoOrder.model.js')).default;
+      order = await ShipmaxxRtoOrder.findOneAndUpdate(
+        query,
+        { $push: { comments: comment } },
+        { returnDocument: 'after' }
+      );
+    } catch (_) {}
+  }
+
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
-  order = await Order.populate(order, { path: 'comments.createdBy', select: 'name role' });
+  // Also push to ShipmaxxRtoOrder if present
+  try {
+    const ShipmaxxRtoOrder = (await import('./models/shipmaxxRtoOrder.model.js')).default;
+    await ShipmaxxRtoOrder.updateMany(
+      { $or: [{ order_id: order.order_id }, { awb_code: order.awb_code }] },
+      { $push: { comments: comment } }
+    );
+  } catch (_) {}
 
-  // Since `.lean()` was originally used (but wouldn't work on the returned doc directly), 
-  // we can use `.toObject()` or just respond with the populated document's comments.
-  const comments = order.toObject ? order.toObject().comments : order.comments;
+  try {
+    order = await Order.populate(order, { path: 'comments.createdBy', select: 'name role' });
+  } catch (_) {}
 
-  res.json(new ApiResponse(200, comments || [], 'Order note saved'));
+  let comments = order.toObject ? order.toObject().comments : order.comments;
+  comments = (comments || []).map(c => {
+    const item = c.toObject ? c.toObject() : { ...c };
+    if (!item.creatorName && item.createdBy && String(item.createdBy._id || item.createdBy) === String(req.user._id)) {
+      item.creatorName = authorName;
+      item.creatorRole = authorRole;
+    }
+    if (!item.createdBy || typeof item.createdBy !== 'object' || !item.createdBy.name) {
+      item.createdBy = {
+        _id: item.createdBy?._id || item.createdBy || req.user._id,
+        name: item.creatorName || (String(item.createdBy) === String(req.user._id) ? authorName : 'Staff'),
+        role: item.creatorRole || authorRole
+      };
+    }
+    return item;
+  });
+
+  res.json(new ApiResponse(200, comments, 'Order note saved'));
 });
 
 export const importOrders = catchAsync(async (req, res) => {
@@ -1566,6 +1756,12 @@ export const runSyncInBackground = async (mode = 'quick') => {
             }
             const statusChanged = status !== o.status;
             const update = { status, delivery_attempt: attempts };
+            const deliveryReason = extractDeliveryReason(tracking);
+            if (deliveryReason) {
+              update.rto_reason = deliveryReason;
+              update.ndr_reason = deliveryReason;
+              update.courier_remarks = deliveryReason;
+            }
             if (!o.courier_name && o.awb_code) { const g = guessCourierByAwb(o.awb_code); if (g) update.courier_name = g; }
             if (statusChanged) {
               // Status changed — derive real timestamp from history, fall back to now
@@ -2735,6 +2931,13 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
   if (awb) update.awb_code = awb;
   if (phone && !existing?.billing_phone) update.billing_phone = phone;
   if (name && !existing?.billing_customer_name) update.billing_customer_name = name;
+
+  const courierReason = p.reason || p.ndr_reason || p.rto_reason || p.courier_remarks || p.remarks || p.description || p.failure_reason || '';
+  if (courierReason) {
+    update.rto_reason = String(courierReason).trim();
+    update.ndr_reason = String(courierReason).trim();
+    update.courier_remarks = String(courierReason).trim();
+  }
 
   // Attempt & NDR mapping matching logic
   let finalStatus = status;

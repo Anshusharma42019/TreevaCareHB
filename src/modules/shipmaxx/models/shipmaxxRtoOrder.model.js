@@ -29,6 +29,8 @@ const shipmaxxRtoOrderSchema = new mongoose.Schema({
     type: { type: String, enum: ['general', 'followup'], default: 'general' },
     section: { type: String, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    creatorName: { type: String, default: '' },
+    creatorRole: { type: String, default: '' },
     createdAt: { type: Date, default: Date.now },
   }],
 }, { timestamps: true });

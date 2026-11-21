@@ -65,6 +65,8 @@ const shipmaxxOrderSchema = new mongoose.Schema({
     type: { type: String, enum: ['general', 'followup'], default: 'general' },
     section: { type: String, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    creatorName: { type: String, default: '' },
+    creatorRole: { type: String, default: '' },
     createdAt: { type: Date, default: Date.now },
   }],
   followup_done: { type: Boolean, default: false },
@@ -74,6 +76,9 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   
   department: { type: String, enum: ['male', 'ortho', 'skin'], default: null, index: true },
   rto_verification_action: { type: String, enum: ['wants_again', 'no_need'], default: null },
+  rto_reason: { type: String, default: '' },
+  ndr_reason: { type: String, default: '' },
+  courier_remarks: { type: String, default: '' },
   interakt_reply_text: { type: String, default: null, index: true },
   interakt_reply_at: { type: Date, default: null },
   interakt_reply_read: { type: Boolean, default: false },
