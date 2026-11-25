@@ -8,6 +8,9 @@ const prescriptionSchema = new mongoose.Schema(
     verification: { type: mongoose.Schema.Types.ObjectId, ref: 'Verification', default: null },
     readyToShipment: { type: mongoose.Schema.Types.ObjectId, ref: 'ReadyToShipment', default: null },
     targetId: { type: String, index: true },
+    orderId: { type: String, default: null },
+    kitNumber: { type: Number, default: 1, min: 1, index: true },
+    kitName: { type: String, default: 'Kit 1' },
     patientName: { type: String },
     phone: { type: String },
     age: { type: Number },
@@ -24,6 +27,7 @@ const prescriptionSchema = new mongoose.Schema(
       {
         id: { type: mongoose.Schema.Types.Mixed },
         name: { type: String },
+        qty: { type: Number, default: 1 },
         dosage: { type: String },
         frequency: { type: String },
         timing: { type: String },
@@ -39,6 +43,9 @@ const prescriptionSchema = new mongoose.Schema(
 
 prescriptionSchema.index({ lead: 1, createdAt: -1 });
 prescriptionSchema.index({ targetId: 1, createdAt: -1 });
+prescriptionSchema.index({ phone: 1, kitNumber: 1 });
+prescriptionSchema.index({ lead: 1, kitNumber: 1 });
+prescriptionSchema.index({ targetId: 1, kitNumber: 1 });
 
 export const Prescription = mongoose.model('Prescription', prescriptionSchema);
 export default Prescription;

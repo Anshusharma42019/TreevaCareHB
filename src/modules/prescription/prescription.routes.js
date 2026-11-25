@@ -4,10 +4,10 @@ import Prescription from './prescription.model.js';
 
 const router = express.Router();
 
-// GET /api/prescriptions/get-by-target?targetId=...&leadId=...&taskId=...
+// GET /api/prescriptions/get-by-target?targetId=...&leadId=...&taskId=...&kitNumber=...
 router.get('/get-by-target', auth('admin', 'manager', 'sales', 'support', 'logistics', 'doctor', 'staff'), async (req, res) => {
   try {
-    const { targetId, leadId, taskId, appointmentId, phone } = req.query;
+    const { targetId, leadId, taskId, appointmentId, phone, kitNumber } = req.query;
     const matchCriteria = [];
     if (targetId) matchCriteria.push({ targetId: String(targetId) });
     if (leadId) matchCriteria.push({ lead: leadId });
@@ -23,8 +23,44 @@ router.get('/get-by-target', auth('admin', 'manager', 'sales', 'support', 'logis
       return res.status(400).json({ status: 400, message: 'Missing targetId or leadId parameter' });
     }
 
-    const prescription = await Prescription.findOne({ $or: matchCriteria }).sort({ updatedAt: -1 }).lean();
-    res.json({ status: 200, data: prescription || null });
+    const rawPrescriptions = await Prescription.find({ $or: matchCriteria }).sort({ kitNumber: 1, createdAt: 1 }).lean();
+
+    if (!rawPrescriptions || rawPrescriptions.length === 0) {
+      return res.json({ status: 200, data: null, allKits: [], totalKits: 0 });
+    }
+
+    const allPrescriptions = rawPrescriptions.map((p, idx) => {
+      const kNum = Number(p.kitNumber) || (idx === 0 ? 1 : idx + 1);
+      return {
+        ...p,
+        kitNumber: kNum,
+        kitName: p.kitName || `Kit ${kNum}`,
+      };
+    });
+
+    let selectedPrescription = null;
+    // 1. If targetId matches a specific prescription (e.g. order 470410 -> Kit 2)
+    if (targetId) {
+      selectedPrescription = allPrescriptions.find((p) => String(p.targetId) === String(targetId));
+    }
+
+    // 2. If kitNumber is requested
+    if (!selectedPrescription && kitNumber) {
+      const kNum = Number(kitNumber);
+      selectedPrescription = allPrescriptions.find((p) => p.kitNumber === kNum);
+    }
+
+    // 3. Fallback: default to latest kit
+    if (!selectedPrescription) {
+      selectedPrescription = allPrescriptions[allPrescriptions.length - 1];
+    }
+
+    res.json({
+      status: 200,
+      data: selectedPrescription,
+      allKits: allPrescriptions,
+      totalKits: allPrescriptions.length,
+    });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }
@@ -33,21 +69,61 @@ router.get('/get-by-target', auth('admin', 'manager', 'sales', 'support', 'logis
 // POST /api/prescriptions/save
 router.post('/save', auth('admin', 'manager', 'sales', 'support', 'logistics', 'doctor', 'staff'), async (req, res) => {
   try {
-    const { targetId, leadId, taskId, appointmentId, verificationId, readyToShipmentId, prescribedMedicines, ...otherFields } = req.body;
+    const {
+      targetId,
+      leadId,
+      taskId,
+      appointmentId,
+      verificationId,
+      readyToShipmentId,
+      orderId,
+      kitNumber: rawKitNumber,
+      kitName: rawKitName,
+      prescriptionDocId,
+      prescribedMedicines,
+      ...otherFields
+    } = req.body;
 
-    const query = [];
-    if (targetId) query.push({ targetId: String(targetId) });
-    if (leadId) query.push({ lead: leadId });
-    if (taskId) query.push({ task: taskId });
-    if (appointmentId) query.push({ appointment: appointmentId });
+    const kitNumber = Number(rawKitNumber) || 1;
+    const kitName = rawKitName || `Kit ${kitNumber}`;
 
     let existing = null;
-    if (query.length > 0) {
-      existing = await Prescription.findOne({ $or: query });
+
+    // 1. If explicit prescription mongo ID provided, update that exact document
+    if (prescriptionDocId && /^[0-9a-fA-F]{24}$/.test(prescriptionDocId)) {
+      existing = await Prescription.findById(prescriptionDocId);
+    }
+
+    // 2. Otherwise search for matching prescription for this specific kitNumber
+    if (!existing) {
+      const criteria = [];
+      if (targetId) criteria.push({ targetId: String(targetId) });
+      if (leadId) criteria.push({ lead: leadId });
+      if (taskId) criteria.push({ task: taskId });
+      if (appointmentId) criteria.push({ appointment: appointmentId });
+      if (otherFields.phone) {
+        const cleanPhone = String(otherFields.phone).replace(/\D/g, '').slice(-10);
+        if (cleanPhone) criteria.push({ phone: new RegExp(cleanPhone, 'i') });
+      }
+
+      if (criteria.length > 0) {
+        const kitFilter = kitNumber === 1
+          ? { $or: [{ kitNumber: 1 }, { kitNumber: { $exists: false } }, { kitNumber: null }] }
+          : { kitNumber: kitNumber };
+
+        existing = await Prescription.findOne({
+          $and: [
+            { $or: criteria },
+            kitFilter,
+          ],
+        });
+      }
     }
 
     const payload = {
       ...otherFields,
+      kitNumber,
+      kitName,
       prescribedMedicines: Array.isArray(prescribedMedicines) ? prescribedMedicines : [],
       createdBy: req.user?._id,
     };
@@ -57,6 +133,7 @@ router.post('/save', auth('admin', 'manager', 'sales', 'support', 'logistics', '
     if (appointmentId) payload.appointment = appointmentId;
     if (verificationId) payload.verification = verificationId;
     if (readyToShipmentId) payload.readyToShipment = readyToShipmentId;
+    if (orderId) payload.orderId = String(orderId);
 
     let savedPrescription;
     if (existing) {
@@ -65,7 +142,26 @@ router.post('/save', auth('admin', 'manager', 'sales', 'support', 'logistics', '
       savedPrescription = await Prescription.create(payload);
     }
 
-    res.json({ status: 200, data: savedPrescription, message: 'Prescription saved successfully in dedicated database collection' });
+    // Fetch all kits for this patient to return in response
+    const searchMatch = [];
+    if (savedPrescription.targetId) searchMatch.push({ targetId: savedPrescription.targetId });
+    if (savedPrescription.lead) searchMatch.push({ lead: savedPrescription.lead });
+    if (savedPrescription.phone) {
+      const cleanPhone = String(savedPrescription.phone).replace(/\D/g, '').slice(-10);
+      if (cleanPhone) searchMatch.push({ phone: new RegExp(cleanPhone, 'i') });
+    }
+
+    const allKits = searchMatch.length > 0
+      ? await Prescription.find({ $or: searchMatch }).sort({ kitNumber: 1, createdAt: 1 }).lean()
+      : [savedPrescription.toObject()];
+
+    res.json({
+      status: 200,
+      data: savedPrescription,
+      allKits,
+      totalKits: allKits.length,
+      message: `Kit ${kitNumber} Prescription saved successfully in dedicated database collection`,
+    });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }
