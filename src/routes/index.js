@@ -18,6 +18,7 @@ import shipmaxxRoute from '../modules/shipmaxx/shipmaxx.routes.js';
 import integrationsRoute from '../modules/integrations/integrations.routes.js';
 import opsDashboardRoute from '../modules/ops-dashboard/opsDashboard.routes.js';
 import prescriptionRoute from '../modules/prescription/prescription.routes.js';
+import galleryRoute from '../modules/gallery/gallery.routes.js';
 
 const router = express.Router();
 // Define all the routes for the application
@@ -42,6 +43,7 @@ const defaultRoutes = [
   { path: '/integrations', route: integrationsRoute },
   { path: '/ops-dashboard', route: opsDashboardRoute },
   { path: '/prescriptions', route: prescriptionRoute },
+  { path: '/gallery', route: galleryRoute },
 ];
  
 defaultRoutes.forEach((route) => {
