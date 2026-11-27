@@ -12,7 +12,14 @@ import interaktController from "./modules/interakt/interakt.controller.js";
 const app = express();
 
 // set security HTTP headers
-app.use(helmet({ referrerPolicy: { policy: "no-referrer-when-downgrade" } }));
+app.use(
+  helmet({
+    referrerPolicy: { policy: "no-referrer-when-downgrade" },
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    frameguard: false,
+    contentSecurityPolicy: false,
+  })
+);
 
 // parse json request body (limit raised to support base64 image uploads)
 app.use(express.json({ limit: "10mb" }));

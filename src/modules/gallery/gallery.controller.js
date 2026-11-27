@@ -48,6 +48,10 @@ export const lookupCustomer = catchAsync(async (req, res) => {
 
 export const viewReportFile = catchAsync(async (req, res) => {
   const { buffer, mimeType, fileName } = await galleryService.getReportFileStream(req.params.id);
+  res.removeHeader('X-Frame-Options');
+  res.removeHeader('Content-Security-Policy');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Content-Type', mimeType);
   res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}"`);
   res.setHeader('Cache-Control', 'public, max-age=86400');
@@ -56,6 +60,10 @@ export const viewReportFile = catchAsync(async (req, res) => {
 
 export const downloadReportFile = catchAsync(async (req, res) => {
   const { buffer, mimeType, fileName } = await galleryService.getReportFileStream(req.params.id);
+  res.removeHeader('X-Frame-Options');
+  res.removeHeader('Content-Security-Policy');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Content-Type', mimeType);
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
   res.setHeader('Cache-Control', 'public, max-age=86400');

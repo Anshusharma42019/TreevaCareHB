@@ -37,14 +37,24 @@ const upload = multer({
 
 const allowedRoles = ['admin', 'manager', 'sales', 'doctor', 'support', 'logistics', 'staff'];
 
+// Middleware to permit cross-origin iframe viewing and file downloading
+const allowIframeStream = (req, res, next) => {
+  res.removeHeader('X-Frame-Options');
+  res.removeHeader('Content-Security-Policy');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  next();
+};
+
 router
   .route('/')
   .post(auth(...allowedRoles), upload.single('file'), galleryController.createReport)
   .get(auth(...allowedRoles), galleryController.getReports);
 
 router.get('/lookup', auth(...allowedRoles), galleryController.lookupCustomer);
-router.get('/view/:id', galleryController.viewReportFile);
-router.get('/download/:id', galleryController.downloadReportFile);
+router.get('/view/:id', allowIframeStream, galleryController.viewReportFile);
+router.get('/download/:id', allowIframeStream, galleryController.downloadReportFile);
 
 router
   .route('/:id')
