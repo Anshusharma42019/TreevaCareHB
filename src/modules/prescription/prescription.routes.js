@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import auth from '../../middleware/auth.js';
 import Prescription from './prescription.model.js';
 
@@ -10,20 +11,26 @@ router.get('/get-by-target', auth('admin', 'manager', 'sales', 'support', 'logis
     const { targetId, leadId, taskId, appointmentId, phone, kitNumber } = req.query;
     const matchCriteria = [];
     if (targetId) matchCriteria.push({ targetId: String(targetId) });
-    if (leadId) matchCriteria.push({ lead: leadId });
-    if (taskId) matchCriteria.push({ task: taskId });
-    if (appointmentId) matchCriteria.push({ appointment: appointmentId });
-    if (targetId && targetId.length === 24) matchCriteria.push({ _id: targetId });
+    if (leadId && mongoose.Types.ObjectId.isValid(leadId)) matchCriteria.push({ lead: leadId });
+    if (taskId && mongoose.Types.ObjectId.isValid(taskId)) matchCriteria.push({ task: taskId });
+    if (appointmentId && mongoose.Types.ObjectId.isValid(appointmentId)) matchCriteria.push({ appointment: appointmentId });
+    if (targetId && mongoose.Types.ObjectId.isValid(targetId)) matchCriteria.push({ _id: targetId });
     if (phone) {
       const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
-      if (cleanPhone) matchCriteria.push({ phone: new RegExp(cleanPhone, 'i') });
+      if (cleanPhone) {
+        matchCriteria.push({
+          phone: { $in: [cleanPhone, `+91${cleanPhone}`, `91${cleanPhone}`, `0${cleanPhone}`] }
+        });
+      }
     }
 
     if (matchCriteria.length === 0) {
       return res.status(400).json({ status: 400, message: 'Missing targetId or leadId parameter' });
     }
 
-    const rawPrescriptions = await Prescription.find({ $or: matchCriteria }).sort({ kitNumber: 1, createdAt: 1 }).lean();
+    const rawPrescriptions = await Prescription.find({ $or: matchCriteria })
+      .sort({ kitNumber: 1, createdAt: 1 })
+      .lean();
 
     if (!rawPrescriptions || rawPrescriptions.length === 0) {
       return res.json({ status: 200, data: null, allKits: [], totalKits: 0 });

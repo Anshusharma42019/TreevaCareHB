@@ -17,4 +17,10 @@ const shipmaxxFollowupSchema = new mongoose.Schema({
   auto_message_sent: { type: Boolean, default: false }
 }, { timestamps: true });
 
+shipmaxxFollowupSchema.index({ order_id: 1, followup_number: 1 }, { unique: true });
+shipmaxxFollowupSchema.index({ order_id: 1, completed: 1 });
+shipmaxxFollowupSchema.index({ staff: 1, completed: 1, scheduled_date: 1 });
+shipmaxxFollowupSchema.index({ completed: 1, scheduled_date: 1 });
+shipmaxxFollowupSchema.index({ order_id: 1, relief_percentage: 1 });
+
 export const ShipmaxxFollowup = mongoose.model('ShipmaxxFollowup', shipmaxxFollowupSchema);

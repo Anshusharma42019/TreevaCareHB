@@ -66,6 +66,11 @@ const customerBaseFields = {
 
 const setupStandardIndexes = (schema) => {
   schema.index({ phone: 1, isArchived: 1 });
+  schema.index({ phone: 1, isArchived: 1, isDeleted: 1 });
+  schema.index({ isArchived: 1, isDeleted: 1, createdAt: -1 });
+  schema.index({ isArchived: 1, isDeleted: 1, department: 1, createdAt: -1 });
+  schema.index({ isArchived: 1, isDeleted: 1, assignedTo: 1, createdAt: -1 });
+  schema.index({ status: 1, isArchived: 1, isDeleted: 1, createdAt: -1 });
   schema.index({ isArchived: 1, assignedTo: 1, createdAt: -1 });
   schema.index({ isArchived: 1, department: 1, createdAt: -1 });
   schema.index({ status: 1, isArchived: 1, createdAt: -1 });

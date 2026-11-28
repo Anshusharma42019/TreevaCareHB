@@ -21,5 +21,7 @@ callAgainSchema.index({ lead: 1 });
 callAgainSchema.index({ status: 1, createdAt: -1 });
 callAgainSchema.index({ status: 1, department: 1, createdAt: -1 });
 callAgainSchema.index({ status: 1, assignedTo: 1, createdAt: -1 });
+callAgainSchema.index({ isDeleted: 1, isArchived: 1, department: 1, createdAt: -1 });
+callAgainSchema.index({ isDeleted: 1, isArchived: 1, createdAt: -1 });
 
 export default mongoose.model('CallAgain', callAgainSchema);

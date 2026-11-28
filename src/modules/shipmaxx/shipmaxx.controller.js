@@ -951,8 +951,7 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   const { from, to, department } = req.query;
 
   const baseConditions = [
-    { platform: 'shipmaxx' },
-    { 'order_items.name': { $not: /migraine|piles/i } }
+    { platform: 'shipmaxx' }
   ];
 
   if (department && department !== 'all') {
@@ -980,23 +979,25 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 
     baseConditions.push({
       $or: [
-        { status: /^(delivered|rto_delivered|DEL|RTD)$/i, ...terminalDateClause },
+        { status: { $in: ['DELIVERED', 'delivered', 'DEL', 'del', 'RTO_DELIVERED', 'rto_delivered', 'RTD', 'rtd'] }, ...terminalDateClause },
         { status: { $regex: PIPELINE_STATUSES_RE } },
-        { status: { $not: /^(delivered|rto_delivered|DEL|RTD)$/i }, ...nonTerminalDateClause },
+        { status: { $nin: ['DELIVERED', 'delivered', 'DEL', 'del', 'RTO_DELIVERED', 'rto_delivered', 'RTD', 'rtd'] }, ...nonTerminalDateClause },
       ]
     });
   }
 
   const match = { $and: baseConditions };
 
-  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
-  const deptCond = (department && department !== 'all') ? { department } : {};
+  const statusFilter = { $in: ['DELIVERED', 'delivered', 'DEL', 'del'] };
+  const deptCond = (department && department !== 'all')
+    ? (department === 'male' ? { $or: [{ department: 'male' }, { department: null }, { department: { $exists: false } }] } : { department })
+    : {};
+
   let deliveredOnlyMatch;
   if (from && to) {
     const terminalDateClause = buildShipmaxxDateMatch('DELIVERED', from, to);
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
-      'order_items.name': { $not: /migraine|piles/i },
       ...deptCond,
       status: statusFilter,
       ...terminalDateClause
@@ -1004,7 +1005,6 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   } else {
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
-      'order_items.name': { $not: /migraine|piles/i },
       ...deptCond,
       status: statusFilter
     };
@@ -1027,7 +1027,7 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
         $group: {
           _id: {
             $cond: [
-              { $regexMatch: { input: { $ifNull: ['$payment_method', 'COD'] }, regex: /cod/i } },
+              { $regexMatch: { input: { $ifNull: ['$payment_method', ''] }, regex: /cod|cash/i } },
               'COD',
               'Prepaid'
             ]
@@ -1138,8 +1138,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   if (!queryStatus) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
 
   const baseConditions = [
-    { platform: 'shipmaxx' },
-    { 'order_items.name': { $not: /migraine|piles/i } }
+    { platform: 'shipmaxx' }
   ];
 
   if (department && department !== 'all') {
@@ -1165,8 +1164,15 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     return [queryStatus, ...reverseShortCodes];
   })();
 
-  // Flexible case-insensitive match for each variant (allowing space, hyphen, or underscore)
-  baseConditions.push({ status: { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) } });
+  // Exact indexed string variants for instant B-tree match
+  const exactVariants = Array.from(new Set([
+    ...allVariants,
+    ...allVariants.map(s => s.toLowerCase()),
+    ...allVariants.map(s => s.toUpperCase()),
+    ...allVariants.map(s => s.replace(/_/g, ' ')),
+    ...allVariants.map(s => s.replace(/ /g, '_'))
+  ]));
+  baseConditions.push({ status: { $in: exactVariants } });
 
   const dateClause = buildShipmaxxDateMatch(queryStatus, from, to);
   if (dateClause) {
@@ -1188,7 +1194,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     .populate('verified_by', 'name role')
     .populate('created_by', 'name role')
     .populate('comments.createdBy', 'name role')
-    .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1, _id: -1 })
+    .sort({ status_updated_at: -1, createdAt: -1 })
     .limit(Math.min(Number(limit) || 50, 500)).lean();
 
   // Backfill missing customer data from raw_response or lead_id
@@ -1213,33 +1219,18 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   if (unlinked.length > 0) {
     const phones = unlinked.map(o => String(o.billing_phone || '').replace(/\D/g, '')).filter(p => p.length >= 10 && !/^x+$/i.test(p));
-    const names = unlinked.map(o => (o.billing_customer_name || '').toLowerCase().trim()).filter(Boolean);
-    const pins = unlinked.map(o => String(o.billing_pincode || '').trim()).filter(p => p.length === 6);
 
-    const leads = await Lead.find({
-      isDeleted: { $ne: true },
-      $or: [
-        { phone: { $in: phones } },
-        { name: { $in: names } },
-        { pincode: { $in: pins } }
-      ]
-    }).select('name phone email address pincode assignedTo').populate('assignedTo', 'name role').lean();
+    let byPhone = {};
+    if (phones.length > 0) {
+      const leads = await Lead.find({
+        isDeleted: { $ne: true },
+        phone: { $in: phones }
+      }).select('name phone assignedTo').populate('assignedTo', 'name role').lean();
 
-    const byPhone = {};
-    const byName = {};
-    const byPin = {};
-    const pinCount = {};
-
-    leads.forEach(l => {
-      if (l.phone) byPhone[String(l.phone).replace(/\D/g, '')] = l;
-      if (l.name) byName[l.name.toLowerCase().trim()] = l;
-      if (l.pincode) {
-        pinCount[l.pincode] = (pinCount[l.pincode] || 0) + 1;
-        byPin[l.pincode] = l;
-      }
-    });
-    // Remove ambiguous pincode matches
-    Object.keys(pinCount).forEach(p => { if (pinCount[p] > 1) delete byPin[p]; });
+      leads.forEach(l => {
+        if (l.phone) byPhone[String(l.phone).replace(/\D/g, '')] = l;
+      });
+    }
 
     orders.forEach(o => {
       let staffName = o.verified_by?.name || o.lead_id?.assignedTo?.name || '';
@@ -1248,9 +1239,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
       if (!staffName) {
         const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
-        const matchedLead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) ||
-          byName[(o.billing_customer_name || '').toLowerCase().trim()] ||
-          byPin[String(o.billing_pincode || '').trim()];
+        const matchedLead = cleanPhone.length >= 10 && byPhone[cleanPhone];
         if (matchedLead) {
           staffName = matchedLead.assignedTo?.name || '';
           staffRole = matchedLead.assignedTo?.role || '';
@@ -1278,6 +1267,11 @@ export const getStatusOrders = catchAsync(async (req, res) => {
       }
     });
   }
+
+  // Strip massive raw_response from response payload to keep network transfer fast & lightweight (<100KB instead of 20MB)
+  orders.forEach(o => {
+    delete o.raw_response;
+  });
 
   res.json(new ApiResponse(200, { data: orders, total: orders.length }, 'Status orders fetched'));
 });
@@ -1873,13 +1867,20 @@ export const getOrders = catchAsync(async (req, res) => {
   }
 
   const pg = Math.max(1, Number(page) || 1);
-  const lim = Math.min(10000, Math.max(1, Number(limit) || 50));
+  const lim = Math.min(1000, Math.max(1, Number(limit) || 50));
 
-  const [orders, total] = await Promise.all([
-    Order.find(match)
+  let orderQuery = Order.find(match);
+  if (lim <= 100) {
+    orderQuery = orderQuery
       .populate({ path: 'lead_id', select: 'phone email assignedTo department problem', populate: { path: 'assignedTo', select: 'name role' } })
       .populate('verified_by', 'name role')
-      .populate('comments.createdBy', 'name role')
+      .populate('comments.createdBy', 'name role');
+  } else {
+    orderQuery = orderQuery.select('order_id awb_code status courier_name billing_customer_name billing_phone sub_total department order_items createdAt status_updated_at delivered_at');
+  }
+
+  const [orders, total] = await Promise.all([
+    orderQuery
       .sort({ createdAt: -1, _id: -1 })
       .skip((pg - 1) * lim)
       .limit(lim)
@@ -2168,18 +2169,15 @@ async function getKitNumbersMap(ordersArray, OrderModel) {
 }
 
 const detectOrderDepartment = (order) => {
-  if (order.department && ['male', 'ortho', 'skin', 'migraine', 'piles'].includes(order.department)) {
+  if (order.department && ['male', 'ortho', 'skin'].includes(order.department)) {
     return order.department;
   }
-  if (order.lead_id?.department && ['male', 'ortho', 'skin', 'migraine', 'piles'].includes(order.lead_id.department)) {
+  if (order.lead_id?.department && ['male', 'ortho', 'skin'].includes(order.lead_id.department)) {
     return order.lead_id.department;
   }
   const prodStr = (order.order_items || []).map(p => (p.name || '').toLowerCase()).join(' ');
   const probStr = (order.verification_problem || order.problem || order.lead_id?.problem || '').toLowerCase();
   const text = `${prodStr} ${probStr}`;
-
-  if (/migraine/i.test(text)) return 'migraine';
-  if (/piles/i.test(text)) return 'piles';
 
   const maleRegex = /\b(male|men|man|sexual|erectile|testosterone|prostate|semen|penis|ed|nightfall|sperm|discharge)\b/i;
   const orthoRegex = /\b(ortho|joint|knee|bone|fracture|arthritis|spine|back pain|shoulder|ligament|gout)\b/i;
@@ -2195,26 +2193,27 @@ const detectOrderDepartment = (order) => {
 // ── Follow-ups ────────────────────────────────────────────────────────────────
 export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const { department } = req.query;
-  const ALLOWED_DEPTS = ['male', 'ortho', 'skin', 'migraine', 'piles'];
+  const ALLOWED_DEPTS = ['male', 'ortho', 'skin'];
 
-  // Auto-heal any orders where followup_done: true was set prematurely before completing all 5 followups
-  try {
-    const mongoose = (await import('mongoose')).default;
-    const incompleteFollowupOrderIds = await Followup.distinct('order_id', { completed: false });
-    if (incompleteFollowupOrderIds.length > 0) {
-      const stringIds = incompleteFollowupOrderIds.map(id => String(id));
-      const objIds = incompleteFollowupOrderIds.map(id => {
-        try { return new mongoose.Types.ObjectId(id); } catch { return null; }
-      }).filter(Boolean);
+  // Auto-heal asynchronously in background so GET request doesn't wait
+  setImmediate(async () => {
+    try {
+      const incompleteFollowupOrderIds = await Followup.distinct('order_id', { completed: false });
+      if (incompleteFollowupOrderIds.length > 0) {
+        const stringIds = incompleteFollowupOrderIds.map(id => String(id));
+        const objIds = incompleteFollowupOrderIds.map(id => {
+          try { return new mongoose.Types.ObjectId(id); } catch { return null; }
+        }).filter(Boolean);
 
-      await Order.updateMany(
-        { platform: 'shipmaxx', followup_done: true, $or: [{ _id: { $in: objIds } }, { order_id: { $in: stringIds } }] },
-        { $set: { followup_done: false, is_completed: false } }
-      ).catch(() => {});
+        await Order.updateMany(
+          { platform: 'shipmaxx', followup_done: true, $or: [{ _id: { $in: objIds } }, { order_id: { $in: stringIds } }] },
+          { $set: { followup_done: false, is_completed: false } }
+        ).catch(() => {});
+      }
+    } catch (err) {
+      console.error('[ShipMaxx Auto-Heal Error]', err.message);
     }
-  } catch (err) {
-    console.error('[ShipMaxx Auto-Heal Error]', err.message);
-  }
+  });
 
   const query = {
     platform: 'shipmaxx',
@@ -2227,10 +2226,14 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     query.$or = [{ department }, { department: null }, { department: { $exists: false } }];
   }
 
+  const fetchLimit = Math.min(Number(req.query.limit) || 350, 500);
+
   let delivered = await Order.find(query)
     .select('-raw_response')
     .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note department age weight gender maritalStatus occupation problemDuration', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
+    .sort({ delivered_at: -1, status_updated_at: -1, createdAt: -1 })
+    .limit(fetchLimit)
     .lean();
 
   // Ensure department is attached to each order object
@@ -2257,10 +2260,18 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     return db - da;
   });
 
-  // Auto-set followups for orders that don't have them yet
+  // Auto-set followups asynchronously in the background so GET response is instant
   const needsSetting = delivered.filter(o => !o.auto_followups_set);
   if (needsSetting.length) {
-    await Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.status_updated_at || o.createdAt || new Date())));
+    setImmediate(async () => {
+      try {
+        for (const o of needsSetting) {
+          await setAutoFollowUps(o._id, o.delivered_at || o.status_updated_at || o.createdAt || new Date()).catch(() => {});
+        }
+      } catch (err) {
+        console.error('[ShipMaxx Background Auto-Followup Error]', err?.message || err);
+      }
+    });
   }
 
   const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } })
@@ -2426,7 +2437,7 @@ export const completeFollowUp = catchAsync(async (req, res) => {
 
 export const getCompletedFollowUps = catchAsync(async (req, res) => {
   const { search, page = 1, per_page = 20, department } = req.query;
-  const ALLOWED_DEPTS = ['male', 'ortho', 'skin', 'migraine', 'piles'];
+  const ALLOWED_DEPTS = ['male', 'ortho', 'skin'];
 
   const conditions = [
     { platform: 'shipmaxx' },
@@ -3012,60 +3023,69 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
 });
 
 export const getNdrList = catchAsync(async (req, res) => {
-  try {
-    const response = await smx.getNdrList(req.query);
-    const rawShipments = response?.shipments || response?.data?.shipments || response?.data?.data || response?.data;
-    if (Array.isArray(rawShipments) && rawShipments.length > 0) {
-      // Fetch local orders to resolve departments & full customer details if available
-      const awbs = rawShipments.map(s => s.awb || s.awb_code).filter(Boolean);
-      const localOrders = await Order.find({ platform: 'shipmaxx', awb_code: { $in: awbs } })
-        .select('awb_code department billing_phone billing_customer_name')
-        .lean();
-      const localMap = new Map();
-      localOrders.forEach(o => { if (o.awb_code) localMap.set(o.awb_code, o); });
+  const { from, to, page = 1, limit = 100, live } = req.query;
 
-      const formatted = rawShipments.map(s => {
-        const awb = s.awb || s.awb_code;
-        const local = localMap.get(awb);
-        const cust = s.customer || {};
-        return {
-          id: s.id,
-          awb_code: awb,
-          channel_order_id: s.orderId || s.order_id || local?.order_id,
-          order_id: s.orderId || s.order_id,
-          shipment_id: s.id,
-          customer_name: cust.name || s.customer_name || local?.billing_customer_name || 'Customer',
-          customer_phone: cust.phone || s.customer_phone || local?.billing_phone || '',
-          customer_email: cust.email || s.customer_email || '',
-          courier_name: s.courier || s.courier_name || '',
-          status: s.status || s.attemptStatus || 'UNDELIVERED',
-          current_status: s.attemptStatus || s.status || 'UNDELIVERED',
-          reason: s.reason || 'Attempt Failure',
-          attempts: Number(s.attemptNumber || s.attempts_used || s.attempts || 1),
-          ndr_raised_at: s.ndrRaisedDate || s.attemptDate || s.created_at || new Date(),
-          payment_method: s.payment_method || 'COD',
-          address: cust.address || s.address || '',
-          city: cust.city || s.city || '',
-          state: cust.state || s.state || '',
-          pincode: cust.pincode || s.pincode || '',
-          department: local?.department || 'male',
-          can_retry: s.can_retry ?? true,
-          can_rto: s.can_rto ?? true,
-          can_escalate: s.can_escalate ?? true,
-          followUps: s.followUps || [],
-          raw: s
-        };
-      });
+  // Only call external API if live=true is explicitly requested
+  if (live === 'true') {
+    try {
+      const response = await smx.getNdrList(req.query);
+      const rawShipments = response?.shipments || response?.data?.shipments || response?.data?.data || response?.data;
+      if (Array.isArray(rawShipments) && rawShipments.length > 0) {
+        // Fetch local orders to resolve departments & full customer details if available
+        const awbs = rawShipments.map(s => s.awb || s.awb_code).filter(Boolean);
+        const localOrders = await Order.find({ platform: 'shipmaxx', awb_code: { $in: awbs } })
+          .select('awb_code department billing_phone billing_customer_name')
+          .lean();
+        const localMap = new Map();
+        localOrders.forEach(o => { if (o.awb_code) localMap.set(o.awb_code, o); });
 
-      return res.json(new ApiResponse(200, { data: formatted, shipments: formatted, meta: response.meta, total: response.meta?.total || formatted.length }, 'NDR list fetched from Shipmaxx API'));
+        const formatted = rawShipments.map(s => {
+          const awb = s.awb || s.awb_code;
+          const local = localMap.get(awb);
+          const cust = s.customer || {};
+          return {
+            id: s.id,
+            awb_code: awb,
+            channel_order_id: s.orderId || s.order_id || local?.order_id,
+            order_id: s.orderId || s.order_id,
+            shipment_id: s.id,
+            customer_name: cust.name || s.customer_name || local?.billing_customer_name || 'Customer',
+            customer_phone: cust.phone || s.customer_phone || local?.billing_phone || '',
+            customer_email: cust.email || s.customer_email || '',
+            courier_name: s.courier || s.courier_name || '',
+            status: s.status || s.attemptStatus || 'UNDELIVERED',
+            current_status: s.attemptStatus || s.status || 'UNDELIVERED',
+            reason: s.reason || 'Attempt Failure',
+            attempts: Number(s.attemptNumber || s.attempts_used || s.attempts || 1),
+            ndr_raised_at: s.ndrRaisedDate || s.attemptDate || s.created_at || new Date(),
+            payment_method: s.payment_method || 'COD',
+            address: cust.address || s.address || '',
+            city: cust.city || s.city || '',
+            state: cust.state || s.state || '',
+            pincode: cust.pincode || s.pincode || '',
+            department: local?.department || 'male',
+            can_retry: s.can_retry ?? true,
+            can_rto: s.can_rto ?? true,
+            can_escalate: s.can_escalate ?? true,
+            followUps: s.followUps || [],
+            raw: s
+          };
+        });
+
+        return res.json(new ApiResponse(200, { data: formatted, shipments: formatted, meta: response.meta, total: response.meta?.total || formatted.length }, 'NDR list fetched from Shipmaxx API'));
+      }
+    } catch (err) {
+      console.warn('[ShipMaxx API NDR Fetch Failed, falling back to local DB]:', err.message);
     }
-  } catch (err) {
-    console.warn('[ShipMaxx API NDR Fetch Failed, falling back to local DB]:', err.message);
   }
 
-  // Fallback to local MongoDB NDR records
-  const { from, to, page = 1, limit = 100 } = req.query;
-  const match = { platform: 'shipmaxx', status: /UNDELIVERED|NDR|EXCEPTION/i };
+  // Fast Instant response from local MongoDB NDR records
+  const ndrStatuses = [
+    'UNDELIVERED', 'undelivered', 'UND', 'und',
+    'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT',
+    'UNDELIVERED_ATTEMPT_FAILURE', 'DELIVERY_EXCEPTION', 'DEX', 'dex'
+  ];
+  const match = { platform: 'shipmaxx', status: { $in: ndrStatuses } };
   if (from && to) {
     match.status_updated_at = {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
@@ -3074,6 +3094,7 @@ export const getNdrList = catchAsync(async (req, res) => {
   }
 
   const orders = await Order.find(match)
+    .select('-raw_response')
     .sort({ status_updated_at: -1, createdAt: -1 })
     .skip((Number(page) - 1) * Number(limit))
     .limit(Number(limit))

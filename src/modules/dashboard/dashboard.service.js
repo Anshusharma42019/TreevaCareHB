@@ -8,6 +8,9 @@ import CallAgain from '../callagain/callagain.model.js';
 import ReorderCommission from '../commission/reorderCommission.model.js';
 import mongoose from 'mongoose';
 
+// Safe fallback for legacy Shiprocket Order collection (prevents ReferenceError)
+const Order = mongoose.models.Order || mongoose.model('Order', new mongoose.Schema({}, { strict: false }), 'orders');
+
 const todayDateStr = () => new Date().toISOString().slice(0, 10);
 const SUB_TOTAL_AMOUNT = { $convert: { input: '$sub_total', to: 'double', onError: 0, onNull: 0 } };
 

@@ -125,19 +125,12 @@ const toPilesLeadPayload = (lead) => ({
 });
 
 export const syncPilesLead = async (lead) => {
-  if (!lead?._id) return;
-  if (lead.department === 'piles') {
-    await PilesLead.findOneAndUpdate(
-      { lead: lead._id },
-      { $set: toPilesLeadPayload(lead) },
-      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-    );
-  } else {
-    await PilesLead.findOneAndUpdate(
-      { lead: lead._id },
-      { $set: { isDeleted: true, deletedAt: new Date() } }
-    );
-  }
+  if (!lead?._id || lead.department !== 'piles') return;
+  await PilesLead.findOneAndUpdate(
+    { lead: lead._id },
+    { $set: toPilesLeadPayload(lead) },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+  );
 };
 
 // Auto-detect department from the problem description text

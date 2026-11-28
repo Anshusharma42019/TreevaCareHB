@@ -8,6 +8,7 @@ import * as interaktService from '../interakt/interakt.service.js';
 import { BulkMessageBatch, BulkMessageRecipient } from './bulkMessage.model.js';
 import { bulkMessageQueue } from './bulkMessageQueue.js';
 import { transitionRecord } from '../transition/transition.service.js';
+import { InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder } from '../transition/statusModels.js';
 
 const createLead = catchAsync(async (req, res) => {
   const lead = await leadService.createLead(req.body, req.user._id, req.user.role, req.userDepartments);
@@ -151,25 +152,29 @@ const searchByPhone = catchAsync(async (req, res) => {
   }
 
   const phoneQuery = phone.trim();
-  const statusModels = await import('../transition/statusModels.js');
-  const allModels = [Lead, statusModels.InterestedLead, statusModels.NotInterestedLead, statusModels.OnHoldOrder, statusModels.PendingOrder, statusModels.VerifiedOrder];
-  
-  let leads = [];
-  for (const Model of allModels) {
-    if (!Model) continue;
-    const found = await Model.find({
-      phone: { $regex: phoneQuery, $options: 'i' },
-      isDeleted: { $ne: true },
-    })
-      .populate('assignedTo', 'name email')
-      .populate('createdBy', 'name')
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .lean();
-    leads = leads.concat(found);
-  }
-  
-  // Sort and limit the combined results
+  const cleanPhone = phoneQuery.replace(/\D/g, '').slice(-10);
+  const phoneFilter = cleanPhone.length === 10
+    ? { phone: { $in: [cleanPhone, `+91${cleanPhone}`, `91${cleanPhone}`, `0${cleanPhone}`] } }
+    : { phone: { $regex: phoneQuery, $options: 'i' } };
+
+  const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+
+  const results = await Promise.all(
+    allModels.filter(Boolean).map((Model) =>
+      Model.find({
+        ...phoneFilter,
+        isDeleted: { $ne: true },
+      })
+        .select('name phone age weight gender maritalStatus occupation problem problemDuration assignedTo createdBy createdAt department')
+        .populate('assignedTo', 'name email')
+        .populate('createdBy', 'name')
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean()
+    )
+  );
+
+  let leads = results.flat();
   leads.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   leads = leads.slice(0, 10);
 

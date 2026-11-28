@@ -104,7 +104,6 @@ async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId,
   if (department && department !== 'all') {
     f.department = String(department).toLowerCase();
   }
-  f['order_items.name'] = { $not: /migraine|piles/i };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
   if (awb) {
     f.awb_code = { $regex: awb, $options: 'i' };

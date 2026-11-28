@@ -47,7 +47,7 @@ const call = async (method, url, options = {}, isRetry = false) => {
     'Content-Type': 'application/json',
   };
   try {
-    const res = await axios({ method, url: `${BASE_URL}${url}`, headers, ...options });
+    const res = await axios({ method, url: `${BASE_URL}${url}`, headers, timeout: 8000, ...options });
     return res.data;
   } catch (err) {
     const msg = err.response?.data?.detail || err.response?.data?.message || err.message;
@@ -89,7 +89,8 @@ export const login = async () => {
 
   try {
     const res = await axios.post(targetUrl, payload, {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 8000
     });
 
     if (res.data && res.data.access_token) {

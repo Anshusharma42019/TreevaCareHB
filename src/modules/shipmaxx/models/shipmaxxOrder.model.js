@@ -89,6 +89,16 @@ shipmaxxOrderSchema.index({ status: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, delivered_at: -1 });
 shipmaxxOrderSchema.index({ lead_id: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, status_updated_at: -1 });
+shipmaxxOrderSchema.index({ platform: 1, status: 1, status_updated_at: -1, createdAt: -1 });
+shipmaxxOrderSchema.index({ platform: 1, department: 1, status: 1, status_updated_at: -1 });
+shipmaxxOrderSchema.index({ platform: 1, status: 1, delivered_at: -1 });
+shipmaxxOrderSchema.index({ platform: 1, department: 1, status: 1, delivered_at: -1 });
+shipmaxxOrderSchema.index({ billing_phone: 1 });
+shipmaxxOrderSchema.index({ platform: 1, status: 1, followup_done: 1, sent_to_verification: 1, delivered_at: -1 });
+shipmaxxOrderSchema.index({ platform: 1, department: 1, status: 1, followup_done: 1 });
+shipmaxxOrderSchema.index({ platform: 1, awb_code: 1 });
+shipmaxxOrderSchema.index({ platform: 1, order_id: 1 });
+shipmaxxOrderSchema.index({ verified_by: 1, status: 1, status_updated_at: -1 });
 shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, update, options = {}) {
   const session = await mongoose.startSession();
   session.startTransaction();

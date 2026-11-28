@@ -43,6 +43,8 @@ const prescriptionSchema = new mongoose.Schema(
 
 prescriptionSchema.index({ lead: 1, createdAt: -1 });
 prescriptionSchema.index({ targetId: 1, createdAt: -1 });
+prescriptionSchema.index({ phone: 1 });
+prescriptionSchema.index({ orderId: 1 });
 prescriptionSchema.index({ phone: 1, kitNumber: 1 });
 prescriptionSchema.index({ lead: 1, kitNumber: 1 });
 prescriptionSchema.index({ targetId: 1, kitNumber: 1 });

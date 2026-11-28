@@ -57,6 +57,9 @@ const verificationSchema = new mongoose.Schema(
   { timestamps: true }
 ); 
 
+verificationSchema.index({ isDeleted: 1, isArchived: 1, status: 1, createdAt: -1 });
+verificationSchema.index({ isDeleted: 1, isArchived: 1, department: 1, status: 1, createdAt: -1 });
+verificationSchema.index({ isDeleted: 1, isArchived: 1, assignedTo: 1, status: 1, createdAt: -1 });
 verificationSchema.index({ status: 1, createdAt: -1 });
 verificationSchema.index({ assignedTo: 1, createdAt: -1 });
 verificationSchema.index({ assignedTo: 1, updatedAt: -1 });
